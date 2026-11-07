@@ -1,3 +1,7 @@
+// ==========================================================================
+// BOKS YOUTUBE FINDER - AI CLI Service (Claude & Codex Cross-Platform)
+// ==========================================================================
+
 const { spawn, execSync } = require('child_process');
 const os = require('os');
 const path = require('path');
@@ -38,12 +42,16 @@ class AiCliService {
       if (fs.existsSync(p)) return p;
     }
 
-    return binaryName; // fallback to plain binary name
+    return binaryName;
+  }
+
+  findCliPath(engine) {
+    return this.detectCliPath(engine);
   }
 
   // Generate recommendation prompt based on outlier videos
   buildPrompt(keyword, videos) {
-    const topOutliers = videos
+    const topOutliers = (videos || [])
       .sort((a, b) => b.outlierMultiplier - a.outlierMultiplier)
       .slice(0, 8);
 
@@ -106,14 +114,12 @@ ${videoSummaries}
     return new Promise((resolve, reject) => {
       let args = [];
       if (engine === 'codex') {
-        // Codex CLI execution arguments
         args = ['exec', prompt];
       } else {
-        // Claude CLI execution arguments
         args = ['-p', prompt];
       }
 
-      console.log(`[AI-CLI] Executing ${engine} CLI:`, cliExecutable, args.slice(0, 1));
+      console.log(`[AI-CLI] Executing ${engine} CLI:`, cliExecutable);
 
       let stdout = '';
       let stderr = '';
@@ -141,7 +147,6 @@ ${videoSummaries}
         }
 
         try {
-          // Extract JSON block if wrapped in markdown fences
           let rawJson = stdout.trim();
           const jsonMatch = rawJson.match(/```json\s*([\s\S]*?)\s*```/) || rawJson.match(/```\s*([\s\S]*?)\s*```/);
           if (jsonMatch) {
@@ -150,7 +155,6 @@ ${videoSummaries}
           const parsed = JSON.parse(rawJson);
           resolve(parsed);
         } catch {
-          // If JSON parsing fails, return text fallback wrapped in structured shape
           resolve({
             summary: `${keyword} 떡상 소재 AI 분석 결과`,
             hookingAngles: ['데이터 기반 AI 분석 완료'],
@@ -170,4 +174,10 @@ ${videoSummaries}
   }
 }
 
-module.exports = AiCliService;
+const serviceInstance = new AiCliService();
+
+module.exports = {
+  detectCliPath: (engine) => serviceInstance.detectCliPath(engine),
+  findCliPath: (engine) => serviceInstance.findCliPath(engine),
+  generateStrategy: (params) => serviceInstance.generateStrategy(params)
+};
