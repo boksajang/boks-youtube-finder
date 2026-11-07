@@ -21,39 +21,43 @@
       <nav class="nav-menu">
         <button class="nav-btn active" data-tab="explorer">
           <span class="nav-icon">🔍</span>
-          <span class="nav-label">트렌드 탐색</span>
+          <span>트렌드 탐색</span>
+        </button>
+        <button class="nav-btn" data-tab="analytics">
+          <span class="nav-icon">📊</span>
+          <span>시각화 분석</span>
         </button>
         <button class="nav-btn" data-tab="outliers">
           <span class="nav-icon">🔥</span>
-          <span class="nav-label">떡상 아웃라이어</span>
-          <span class="badge-count" id="outlier-count-badge">0</span>
+          <span>떡상 아웃라이어</span>
+          <span id="outlier-count-badge" class="badge-count" style="display: none;">0</span>
         </button>
         <button class="nav-btn" data-tab="ai-strategist">
-          <span class="nav-icon">💡</span>
-          <span class="nav-label">AI 기획 추천기</span>
+          <span class="nav-icon">✨</span>
+          <span>AI 기획 추천기</span>
         </button>
         <button class="nav-btn" data-tab="settings">
           <span class="nav-icon">⚙️</span>
-          <span class="nav-label">환경설정</span>
+          <span>환경설정</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="api-status-card" id="api-status-card">
-          <span class="status-dot"></span>
-          <span class="status-text" id="status-text">API 키 확인 중...</span>
+        <div class="api-status-card">
+          <div class="status-dot"></div>
+          <span id="status-text">API 확인 중...</span>
         </div>
-        <div class="version-tag">v1.0.0 by 복사장</div>
+        <div class="version-tag">v1.2.0 · 복사장 에디션</div>
       </div>
     </aside>
 
-    <!-- Main Content Area -->
+    <!-- Main Content -->
     <main class="main-content">
-      <!-- Top Search & Quick Action Header -->
+      <!-- Top Sticky Search & Filter Header -->
       <header class="top-header">
         <div class="search-box">
-          <span class="search-icon">🔍</span>
-          <input type="text" id="search-input" placeholder="키워드나 주제를 입력하세요 (예: 개발 부업, 스마트스토어, AI 자동화, 음악 제작)" autofocus>
+          <span class="search-icon">🔎</span>
+          <input type="text" id="search-input" placeholder="분석할 키워드를 입력하세요 (예: AI 부업, 쇼츠 자동화, 롱폼 편집)" autofocus>
           <button id="search-btn" class="btn-primary">
             <span>🚀 떡상 분석</span>
           </button>
@@ -61,163 +65,273 @@
 
         <div class="filter-bar">
           <div class="filter-group">
+            <span class="filter-label">국가:</span>
+            <select id="region-filter" class="select-control">
+              <option value="KR" selected>🇰🇷 대한민국 (KR)</option>
+              <option value="US">🇺🇸 미국 (US)</option>
+              <option value="JP">🇯🇵 일본 (JP)</option>
+              <option value="ALL">🌐 글로벌 전체</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">언어:</span>
+            <select id="lang-filter" class="select-control">
+              <option value="ko" selected>한국어 (ko)</option>
+              <option value="en">영어 (en)</option>
+              <option value="ja">일본어 (ja)</option>
+              <option value="ALL">전체 언어</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
             <span class="filter-label">형태:</span>
             <div class="toggle-group" id="format-toggle">
               <button class="toggle-btn active" data-format="all">전체</button>
               <button class="toggle-btn" data-format="long">롱폼</button>
-              <button class="toggle-btn" data-format="shorts">숏폼</button>
+              <button class="toggle-btn" data-format="shorts">쇼츠</button>
             </div>
           </div>
 
           <div class="filter-group">
-            <span class="filter-label">떡상 기준:</span>
+            <span class="filter-label">떡상 배수:</span>
             <select id="outlier-filter" class="select-control">
-              <option value="0">전체 영상</option>
-              <option value="2">구독자 대비 2배 이상</option>
-              <option value="3" selected>구독자 대비 3배 이상 (추천)</option>
-              <option value="5">구독자 대비 5배 이상 (초대박)</option>
-              <option value="10">구독자 대비 10배 이상 (슈퍼 떡상)</option>
+              <option value="0">전체 배수</option>
+              <option value="2.0">2배 이상</option>
+              <option value="3.0" selected>3배 이상 (추천 ⚡)</option>
+              <option value="5.0">5배 이상 (대박 🔥)</option>
+              <option value="10.0">10배 이상 (초대박 🚀)</option>
             </select>
           </div>
 
           <div class="filter-group">
             <span class="filter-label">정렬:</span>
             <select id="sort-filter" class="select-control">
-              <option value="outlier" selected>떡상 배수 높은 순</option>
-              <option value="views">조회수 많은 순</option>
-              <option value="date">최신 등록 순</option>
+              <option value="outlier">떡상 배수 높은순</option>
+              <option value="views">총 조회수 높은순</option>
+              <option value="date">최신 등록순</option>
             </select>
+          </div>
+
+          <div class="filter-group" style="margin-left: auto;">
+            <button id="btn-export-csv" class="btn-secondary" title="엑셀 분석용 CSV 다운로드">
+              <span>📥 CSV 내보내기</span>
+            </button>
           </div>
         </div>
       </header>
 
-      <!-- Content Views (Tabs) -->
+      <!-- Views Container -->
       <div class="view-container">
-        <!-- 1. Explorer View -->
-        <section class="tab-view active" id="view-explorer">
-          <!-- Summary Metrics -->
+        <!-- Tab 1: Explorer View (Main Grid) -->
+        <section id="view-explorer" class="tab-view active">
+          <!-- Summary Metrics Cards -->
           <div class="summary-cards" id="summary-cards" style="display: none;">
             <div class="metric-card">
-              <span class="metric-label">수집된 영상</span>
+              <span class="metric-label">총 분석 영상</span>
               <span class="metric-value" id="metric-total">0개</span>
             </div>
             <div class="metric-card highlight">
-              <span class="metric-label">떡상 아웃라이어</span>
+              <span class="metric-label">🔥 떡상 아웃라이어</span>
               <span class="metric-value" id="metric-outliers">0개</span>
             </div>
             <div class="metric-card">
               <span class="metric-label">최고 떡상 배수</span>
-              <span class="metric-value" id="metric-max-multiplier">0.0x</span>
+              <span class="metric-value" id="metric-max-multiplier">0x</span>
             </div>
             <div class="metric-card action-card">
-              <button id="quick-ai-btn" class="btn-ai-action">
-                <span>💡 AI 떡상 기획안 바로 뽑기</span>
-              </button>
+              <button id="quick-ai-btn" class="btn-ai-action">✨ 로컬 AI 떡상 기획안 도출</button>
             </div>
           </div>
 
-          <!-- Video Grid -->
-          <div class="video-grid" id="video-grid">
-            <div class="empty-state" id="empty-state">
+          <!-- Videos Grid -->
+          <div id="video-grid" class="video-grid">
+            <div class="empty-state">
               <div class="empty-icon">🎯</div>
               <h3>키워드를 입력하고 [떡상 분석]을 눌러보세요</h3>
-              <p>구독자는 적은데 조회수는 폭발한 '진짜 알짜 떡상 영상'을 자동으로 발라냅니다.</p>
+              <p>구독자 수 대비 조회수가 비정상적으로 터진 알짜 떡상 영상들을 찾아냅니다.</p>
             </div>
           </div>
         </section>
 
-        <!-- 2. Outliers Dedicated View -->
-        <section class="tab-view" id="view-outliers">
+        <!-- Tab 2: Visual Analytics View (NEW CHARTS & METRICS) -->
+        <section id="view-analytics" class="tab-view">
+          <div class="analytics-dashboard">
+            <!-- Opportunity Gauge Card -->
+            <div class="chart-card opportunity-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="chart-title">🎯 시장 진입 기회 지수 (Opportunity Score)</h3>
+                  <p class="chart-subtitle">하꼬/소형 채널(구독자 2만 이하)의 알고리즘 침투율 분석</p>
+                </div>
+                <div class="gauge-badge" id="gauge-level-badge">분석 대기</div>
+              </div>
+
+              <div class="gauge-bar-wrapper">
+                <div class="gauge-bar-track">
+                  <div id="gauge-bar-fill" class="gauge-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="gauge-labels">
+                  <span>대형 독점 (0)</span>
+                  <span id="gauge-score-text" style="font-weight: 700; color: #fff;">0점</span>
+                  <span>빈집 기회 (100)</span>
+                </div>
+              </div>
+
+              <p id="gauge-advice-text" class="gauge-advice">키워드를 먼저 검색해 주세요.</p>
+
+              <div class="mini-metrics-row">
+                <div class="mini-metric">
+                  <span class="mini-label">소형 채널 점유율</span>
+                  <span id="metric-small-share" class="mini-val">0%</span>
+                </div>
+                <div class="mini-metric">
+                  <span class="mini-label">소형 떡상 영상 수</span>
+                  <span id="metric-small-outliers" class="mini-val">0개</span>
+                </div>
+                <div class="mini-metric">
+                  <span class="mini-label">평균 조회수</span>
+                  <span id="metric-avg-views" class="mini-val">0</span>
+                </div>
+                <div class="mini-metric">
+                  <span class="mini-label">평균 구독자수</span>
+                  <span id="metric-avg-subs" class="mini-val">0</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Scatter Plot 2D Matrix (Subscribers vs Views) -->
+            <div class="chart-card">
+              <div class="card-header-flex">
+                <div>
+                  <h3 class="chart-title">📊 떡상 매트릭스 산점도 (Subscribers vs Views)</h3>
+                  <p class="chart-subtitle">대각선 기준선 위로 솟아오른 영상일수록 순수 기획력으로 떡상한 영상입니다</p>
+                </div>
+                <div class="scatter-legend">
+                  <span class="leg-dot mega"></span> 10x+ 초대박
+                  <span class="leg-dot high"></span> 3x+ 떡상
+                  <span class="leg-dot normal"></span> 일반
+                </div>
+              </div>
+
+              <div class="canvas-container">
+                <canvas id="scatter-canvas" width="1000" height="420"></canvas>
+                <div id="scatter-tooltip" class="chart-tooltip" style="display: none;"></div>
+              </div>
+            </div>
+
+            <!-- Two Columns: Keywords Frequency & Upload Day Distribution -->
+            <div class="charts-row-split">
+              <!-- Keyword Frequency Bar Chart -->
+              <div class="chart-card">
+                <h3 class="chart-title">🏷️ 떡상 제목 빈출 키워드 TOP 10</h3>
+                <p class="chart-subtitle">조회수를 끌어당긴 치트키 단어 빈도 (클릭 시 해당 키워드 필터)</p>
+                <div id="keywords-bar-container" class="bars-container">
+                  <div class="empty-chart-text">검색 결과가 없습니다.</div>
+                </div>
+              </div>
+
+              <!-- Day of Week Distribution -->
+              <div class="chart-card">
+                <h3 class="chart-title">📅 요일별 업로드 성과 분포</h3>
+                <p class="chart-subtitle">떡상 영상들이 주로 업로드된 골든 요일</p>
+                <div id="days-bar-container" class="bars-container">
+                  <div class="empty-chart-text">검색 결과가 없습니다.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab 3: Outliers View -->
+        <section id="view-outliers" class="tab-view">
           <div class="section-header">
-            <h2>🔥 구독자 대비 조회수 폭발 영상만 모아보기</h2>
-            <p>체급(구독자수)을 뛰어넘고 알고리즘을 터뜨린 진짜배기 소재 목록입니다.</p>
+            <h2>🔥 떡상 아웃라이어 집중 분석</h2>
+            <p>구독자 수 대비 조회수가 3배 이상 폭발한 알짜배기 영상들만 모았습니다.</p>
           </div>
-          <div class="video-grid" id="outlier-video-grid">
-            <!-- Populated via JS -->
-          </div>
-        </section>
-
-        <!-- 3. AI Strategist View -->
-        <section class="tab-view" id="view-ai-strategist">
-          <div class="ai-view-container">
-            <div class="ai-hero-card">
-              <div class="ai-hero-info">
-                <h2>💡 AI 떡상 소재 자동 추천기</h2>
-                <p>수집된 떡상 아웃라이어 데이터를 로컬 AI(Claude/Codex CLI)가 분석하여, 초보 부업러가 즉시 제작할 수 있는 기획안을 도출합니다.</p>
-              </div>
-              <div class="ai-hero-action">
-                <button id="generate-ai-plan-btn" class="btn-ai-primary">
-                  <span>✨ 떡상 기획안 생성하기</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- AI Results Area -->
-            <div class="ai-result-area" id="ai-result-area">
-              <div class="empty-ai-state">
-                <div class="empty-icon">🤖</div>
-                <h3>아직 생성된 기획안이 없습니다</h3>
-                <p>먼저 키워드를 검색한 후 [떡상 기획안 생성하기] 버튼을 눌러주세요.</p>
-              </div>
+          <div id="outlier-video-grid" class="video-grid">
+            <div class="empty-state">
+              <div class="empty-icon">⚡</div>
+              <h3>발견된 떡상 아웃라이어가 없습니다</h3>
+              <p>키워드를 검색하면 3배 이상 터진 알짜 영상들이 이곳에 모입니다.</p>
             </div>
           </div>
         </section>
 
-        <!-- 4. Settings View -->
-        <section class="tab-view" id="view-settings">
+        <!-- Tab 4: AI Strategist View -->
+        <section id="view-ai-strategist" class="tab-view">
+          <div class="ai-hero-card">
+            <div class="ai-hero-info">
+              <h2>✨ 로컬 AI 떡상 기획 전략가</h2>
+              <p>종량제 API 비용 0원. 내 PC의 Claude CLI / Codex CLI를 직접 호출하여 수집된 상위 떡상 영상들의 후킹 포인트를 벤치마킹한 실전 기획안을 도출합니다.</p>
+            </div>
+            <button id="generate-ai-plan-btn" class="btn-ai-primary">
+              <span>🚀 떡상 기획안 생성</span>
+            </button>
+          </div>
+
+          <div id="ai-result-area">
+            <div class="empty-ai-state">
+              <div class="empty-icon">💡</div>
+              <h3>아직 생성된 기획안이 없습니다</h3>
+              <p>키워드를 검색한 후 상단의 [떡상 기획안 생성] 버튼을 눌러보세요.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab 5: Settings View -->
+        <section id="view-settings" class="tab-view">
           <div class="settings-container">
             <div class="settings-section">
-              <h3>🔑 YouTube Data API v3 설정</h3>
-              <p class="settings-desc">Google Cloud Console에서 발급받은 무료 YouTube Data API v3 키를 입력하세요. 개인 PC에만 안전하게 보관됩니다.</p>
+              <h3>🔑 YouTube Data API v3 키 설정</h3>
+              <p class="settings-desc">YouTube Data API는 무료로 하루 10,000 유닛을 제공합니다. 본 앱의 배치 최적화로 하루 100회 이상의 정밀 분석이 가능합니다.</p>
               <div class="form-group">
-                <label for="setting-api-key">API 키</label>
+                <label for="setting-api-key">API Key</label>
                 <div class="input-with-btn">
                   <input type="password" id="setting-api-key" placeholder="AIzaSy...">
                   <button id="btn-toggle-key" class="btn-secondary">보기</button>
                 </div>
               </div>
               <div class="guide-link-box">
-                <span>💡 API 키 발급이 처음이신가요?</span>
-                <a href="#" id="link-api-guide" class="text-link">무료 발급 가이드 링크 열기 ↗</a>
+                <span>API 키가 없으신가요? Google Cloud 콘솔에서 무료로 발급받을 수 있습니다.</span>
+                <a href="#" id="link-api-guide" class="text-link">키 발급 가이드 ↗</a>
               </div>
             </div>
 
             <div class="settings-section">
-              <h3>🧠 AI CLI 엔진 연동 (API 비용 0원)</h3>
-              <p class="settings-desc">종량제 API 비용 없이, PC에 설치된 Claude CLI 또는 Codex CLI 구독 세션을 직접 호출합니다.</p>
+              <h3>🤖 AI 분석 CLI 엔진 선택</h3>
+              <p class="settings-desc">종량제 API 과금 없이, 로컬에 설치된 CLI 세션을 직접 사용합니다. (Windows / macOS 지원)</p>
+              
+              <div class="radio-cards">
+                <label class="radio-card">
+                  <input type="radio" name="ai-engine" value="claude" checked>
+                  <div class="radio-content">
+                    <span class="engine-name">Claude CLI</span>
+                    <span class="engine-desc">@anthropic-ai/claude-code</span>
+                  </div>
+                </label>
+                <label class="radio-card">
+                  <input type="radio" name="ai-engine" value="codex">
+                  <div class="radio-content">
+                    <span class="engine-name">Codex CLI</span>
+                    <span class="engine-desc">OpenAI Codex 환경</span>
+                  </div>
+                </label>
+              </div>
+
               <div class="form-group">
-                <label>기본 AI 엔진 선택</label>
-                <div class="radio-cards">
-                  <label class="radio-card">
-                    <input type="radio" name="ai-engine" value="claude" checked>
-                    <div class="radio-content">
-                      <span class="engine-name">🟣 Claude CLI</span>
-                      <span class="engine-desc">Anthropic Claude 공식 CLI (claude -p)</span>
-                    </div>
-                  </label>
-                  <label class="radio-card">
-                    <input type="radio" name="ai-engine" value="codex">
-                    <div class="radio-content">
-                      <span class="engine-name">🟢 Codex CLI</span>
-                      <span class="engine-desc">OpenAI Codex / ChatGPT CLI (codex exec)</span>
-                    </div>
-                  </label>
+                <label for="setting-claude-path">Claude CLI 경로 (기본값: 자동 감지)</label>
+                <div class="input-with-btn">
+                  <input type="text" id="setting-claude-path" placeholder="claude">
+                  <button class="btn-secondary btn-auto-detect" data-engine="claude">경로 찾기</button>
                 </div>
               </div>
 
               <div class="form-group">
-                <label for="setting-claude-path">Claude CLI 경로 (비워두면 자동 감지)</label>
+                <label for="setting-codex-path">Codex CLI 경로 (기본값: 자동 감지)</label>
                 <div class="input-with-btn">
-                  <input type="text" id="setting-claude-path" placeholder="자동 감지됨 (예: claude)">
-                  <button class="btn-secondary btn-auto-detect" data-engine="claude">자동 감지</button>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label for="setting-codex-path">Codex CLI 경로 (비워두면 자동 감지)</label>
-                <div class="input-with-btn">
-                  <input type="text" id="setting-codex-path" placeholder="자동 감지됨 (예: codex)">
-                  <button class="btn-secondary btn-auto-detect" data-engine="codex">자동 감지</button>
+                  <input type="text" id="setting-codex-path" placeholder="codex">
+                  <button class="btn-secondary btn-auto-detect" data-engine="codex">경로 찾기</button>
                 </div>
               </div>
             </div>

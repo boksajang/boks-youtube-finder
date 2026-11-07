@@ -4,7 +4,9 @@
 
 let currentConfig = null;
 let currentVideos = [];
+let currentAnalytics = null;
 let currentKeyword = '';
+let activeKeywordFilter = '';
 
 // DOM Elements
 const navBtns = document.querySelectorAll('.nav-btn');
@@ -15,9 +17,12 @@ const statusText = document.getElementById('status-text');
 // Search & Filter Elements
 const searchInput = document.getElementById('search-input');
 const searchBtn = document.getElementById('search-btn');
+const regionFilter = document.getElementById('region-filter');
+const langFilter = document.getElementById('lang-filter');
 const formatBtns = document.querySelectorAll('#format-toggle .toggle-btn');
 const outlierFilter = document.getElementById('outlier-filter');
 const sortFilter = document.getElementById('sort-filter');
+const btnExportCsv = document.getElementById('btn-export-csv');
 
 // Grid & Summary Elements
 const summaryCards = document.getElementById('summary-cards');
@@ -29,6 +34,20 @@ const quickAiBtn = document.getElementById('quick-ai-btn');
 
 const videoGrid = document.getElementById('video-grid');
 const outlierVideoGrid = document.getElementById('outlier-video-grid');
+
+// Analytics Elements
+const gaugeLevelBadge = document.getElementById('gauge-level-badge');
+const gaugeBarFill = document.getElementById('gauge-bar-fill');
+const gaugeScoreText = document.getElementById('gauge-score-text');
+const gaugeAdviceText = document.getElementById('gauge-advice-text');
+const metricSmallShare = document.getElementById('metric-small-share');
+const metricSmallOutliers = document.getElementById('metric-small-outliers');
+const metricAvgViews = document.getElementById('metric-avg-views');
+const metricAvgSubs = document.getElementById('metric-avg-subs');
+const scatterCanvas = document.getElementById('scatter-canvas');
+const scatterTooltip = document.getElementById('scatter-tooltip');
+const keywordsBarContainer = document.getElementById('keywords-bar-container');
+const daysBarContainer = document.getElementById('days-bar-container');
 
 // AI Elements
 const generateAiPlanBtn = document.getElementById('generate-ai-plan-btn');
@@ -50,6 +69,7 @@ async function init() {
   updateApiStatusUI();
   populateSettingsUI();
   setupEventListeners();
+  setupCanvasInteraction();
 }
 
 // --- Navigation Tabs ---
@@ -61,6 +81,10 @@ function switchTab(tabId) {
   tabViews.forEach(view => {
     view.classList.toggle('active', view.id === `view-${tabId}`);
   });
+
+  if (tabId === 'analytics' && currentVideos.length > 0) {
+    setTimeout(renderScatterChart, 50);
+  }
 }
 
 // --- Status & Settings UI ---
@@ -85,18 +109,23 @@ function populateSettingsUI() {
 
 // --- Event Listeners ---
 function setupEventListeners() {
-  // Tab switching
   navBtns.forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
 
-  // Search actions
   searchBtn.addEventListener('click', handleSearch);
   searchInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') handleSearch();
   });
 
-  // Filters change
+  regionFilter.addEventListener('change', () => {
+    if (currentVideos.length > 0) handleSearch();
+  });
+
+  langFilter.addEventListener('change', () => {
+    if (currentVideos.length > 0) handleSearch();
+  });
+
   formatBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       formatBtns.forEach(b => b.classList.remove('active'));
@@ -107,17 +136,15 @@ function setupEventListeners() {
 
   outlierFilter.addEventListener('change', renderVideos);
   sortFilter.addEventListener('change', renderVideos);
+  btnExportCsv.addEventListener('click', handleExportCsv);
 
-  // Quick AI transition button
   quickAiBtn.addEventListener('click', () => {
     switchTab('ai-strategist');
     handleGenerateAiStrategy();
   });
 
-  // AI Generation Button
   generateAiPlanBtn.addEventListener('click', handleGenerateAiStrategy);
 
-  // Settings Actions
   btnToggleKey.addEventListener('click', () => {
     if (settingApiKey.type === 'password') {
       settingApiKey.type = 'text';
@@ -164,6 +191,12 @@ function setupEventListeners() {
       saveFeedback.textContent = '❌ 저장 실패: ' + res.error;
     }
   });
+
+  window.addEventListener('resize', () => {
+    if (document.getElementById('view-analytics').classList.contains('active')) {
+      renderScatterChart();
+    }
+  });
 }
 
 // --- Search Handler ---
@@ -183,19 +216,27 @@ async function handleSearch() {
   }
 
   currentKeyword = query;
+  activeKeywordFilter = '';
   videoGrid.innerHTML = '<div class="spinner"></div>';
   summaryCards.style.display = 'none';
 
   try {
-    const results = await window.api.searchYouTube({ query, maxResults: 40 });
-    currentVideos = results;
+    const res = await window.api.searchYouTube({
+      query,
+      maxResults: 40,
+      regionCode: regionFilter.value,
+      relevanceLanguage: langFilter.value
+    });
+
+    currentVideos = res.videos || [];
+    currentAnalytics = res.analytics || null;
 
     if (!currentVideos || currentVideos.length === 0) {
       videoGrid.innerHTML = `
         <div class="empty-state">
           <div class="empty-icon">🔍</div>
           <h3>검색 결과가 없습니다</h3>
-          <p>"${query}"에 대한 검색 결과가 없습니다. 다른 검색어로 시도해 보세요.</p>
+          <p>"${query}"에 대한 검색 결과가 없습니다. 국가/언어 필터나 검색어를 변경해 보세요.</p>
         </div>
       `;
       return;
@@ -203,6 +244,7 @@ async function handleSearch() {
 
     updateMetrics();
     renderVideos();
+    renderAnalyticsView();
   } catch (err) {
     videoGrid.innerHTML = `
       <div class="empty-state">
@@ -225,6 +267,7 @@ function updateMetrics() {
   metricOutliers.textContent = `${outliers.length}개`;
   metricMaxMultiplier.textContent = `${maxMultiplier}x`;
   outlierCountBadge.textContent = outliers.length;
+  outlierCountBadge.style.display = outliers.length > 0 ? 'inline-block' : 'none';
 
   summaryCards.style.display = 'grid';
 }
@@ -240,6 +283,7 @@ function renderVideos() {
     if (activeFormat === 'long' && v.isShorts) return false;
     if (activeFormat === 'shorts' && !v.isShorts) return false;
     if (v.outlierMultiplier < minRatio) return false;
+    if (activeKeywordFilter && !v.title.toLowerCase().includes(activeKeywordFilter.toLowerCase())) return false;
     return true;
   });
 
@@ -257,14 +301,15 @@ function renderVideos() {
       <div class="empty-state">
         <div class="empty-icon">👀</div>
         <h3>조건에 맞는 영상이 없습니다</h3>
-        <p>상단의 필터(형태, 떡상 기준) 조건을 완화해 보세요.</p>
+        <p>상단의 필터 조건을 완화하거나 키워드 필터를 해제해 보세요.</p>
+        ${activeKeywordFilter ? `<button class="btn-secondary" style="margin-top: 10px;" onclick="clearKeywordFilter()">키워드 필터("${activeKeywordFilter}") 초기화</button>` : ''}
       </div>
     `;
   } else {
     videoGrid.innerHTML = filtered.map(v => createVideoCardHtml(v)).join('');
   }
 
-  // 4. Render Dedicated Outliers Grid (only videos with outlierMultiplier >= 3.0)
+  // 4. Render Dedicated Outliers Grid
   const trueOutliers = currentVideos.filter(v => v.outlierMultiplier >= 3.0)
     .sort((a, b) => b.outlierMultiplier - a.outlierMultiplier);
 
@@ -291,6 +336,11 @@ function renderVideos() {
   });
 }
 
+function clearKeywordFilter() {
+  activeKeywordFilter = '';
+  renderVideos();
+}
+
 function createVideoCardHtml(v) {
   let tagClass = 'normal';
   let tagEmoji = '📈';
@@ -305,7 +355,7 @@ function createVideoCardHtml(v) {
   const thumbUrl = v.thumbnails?.medium?.url || v.thumbnails?.high?.url || v.thumbnails?.default?.url || '';
 
   return `
-    <div class="video-card">
+    <div class="video-card" id="card-${v.id}">
       <div class="thumb-container">
         <img src="${thumbUrl}" alt="${v.title}" loading="lazy">
         ${v.isShorts ? '<span class="badge-shorts">SHORTS</span>' : ''}
@@ -331,6 +381,301 @@ function createVideoCardHtml(v) {
       </div>
     </div>
   `;
+}
+
+// ==========================================================================
+// VISUAL ANALYTICS & CHARTS
+// ==========================================================================
+
+function renderAnalyticsView() {
+  if (!currentAnalytics) return;
+
+  // 1. Opportunity Score Gauge
+  const a = currentAnalytics;
+  gaugeLevelBadge.textContent = a.opportunityLevel;
+  gaugeLevelBadge.style.color = a.opportunityColor;
+  gaugeLevelBadge.style.borderColor = a.opportunityColor;
+  gaugeLevelBadge.style.backgroundColor = `${a.opportunityColor}20`;
+
+  gaugeBarFill.style.width = `${a.opportunityScore}%`;
+  gaugeScoreText.textContent = `${a.opportunityScore}점 / 100점`;
+  gaugeAdviceText.textContent = a.opportunityAdvice;
+
+  metricSmallShare.textContent = `${a.smallChannelShare}% (${a.smallChannelCount}개)`;
+  metricSmallOutliers.textContent = `${a.smallOutlierCount}개`;
+  metricAvgViews.textContent = a.avgViewsFormatted;
+  metricAvgSubs.textContent = a.avgSubscribersFormatted;
+
+  // 2. Keyword Frequency Bars
+  if (a.topKeywords && a.topKeywords.length > 0) {
+    const maxCount = Math.max(...a.topKeywords.map(k => k.count), 1);
+    keywordsBarContainer.innerHTML = a.topKeywords.map(k => `
+      <div class="bar-row">
+        <span class="bar-label" title="${k.word} 필터링" onclick="filterByKeyword('${k.word}')">${k.word}</span>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: ${(k.count / maxCount) * 100}%;"></div>
+        </div>
+        <span class="bar-val">${k.count}회 (${k.percent}%)</span>
+      </div>
+    `).join('');
+  } else {
+    keywordsBarContainer.innerHTML = '<div class="empty-chart-text">분석된 키워드가 없습니다.</div>';
+  }
+
+  // 3. Day of Week Distribution
+  const days = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+  const maxDayCount = Math.max(...a.dayDistribution, 1);
+  daysBarContainer.innerHTML = days.map((day, i) => {
+    const count = a.dayDistribution[i] || 0;
+    const pct = Math.round((count / currentVideos.length) * 100) || 0;
+    return `
+      <div class="bar-row">
+        <span class="bar-label">${day}</span>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: ${(count / maxDayCount) * 100}%; background: linear-gradient(90deg, #10b981, #34d399);"></div>
+        </div>
+        <span class="bar-val">${count}개 (${pct}%)</span>
+      </div>
+    `;
+  }).join('');
+
+  // 4. Scatter Plot
+  renderScatterChart();
+}
+
+window.filterByKeyword = function(word) {
+  activeKeywordFilter = word;
+  switchTab('explorer');
+  renderVideos();
+};
+
+// --- Interactive 2D Scatter Plot Canvas ---
+let chartPoints = [];
+
+function renderScatterChart() {
+  if (!scatterCanvas || currentVideos.length === 0) return;
+
+  const rect = scatterCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  scatterCanvas.width = rect.width * dpr;
+  scatterCanvas.height = rect.height * dpr;
+
+  const ctx = scatterCanvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width;
+  const h = rect.height;
+  const padding = { top: 30, right: 30, bottom: 45, left: 70 };
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Determine Max Scales (Logarithmic Scale for YouTube data)
+  const plotW = w - padding.left - padding.right;
+  const plotH = h - padding.top - padding.bottom;
+
+  const maxSubs = Math.max(...currentVideos.map(v => v.subscriberCount), 1000);
+  const maxViews = Math.max(...currentVideos.map(v => v.viewCount), 1000);
+
+  const logMaxX = Math.log10(Math.max(maxSubs, 100000));
+  const logMaxY = Math.log10(Math.max(maxViews, 1000000));
+  const logMin = 2; // 100
+
+  function getX(subs) {
+    const logVal = Math.log10(Math.max(subs, 100));
+    return padding.left + ((logVal - logMin) / (logMaxX - logMin)) * plotW;
+  }
+
+  function getY(views) {
+    const logVal = Math.log10(Math.max(views, 100));
+    return h - padding.bottom - ((logVal - logMin) / (logMaxY - logMin)) * plotH;
+  }
+
+  // Draw Grid Lines
+  ctx.strokeStyle = '#252a3d';
+  ctx.lineWidth = 1;
+  ctx.fillStyle = '#626c85';
+  ctx.font = '11px sans-serif';
+
+  // X Axis Grid & Labels (Subscribers)
+  const subTicks = [1000, 10000, 100000, 1000000];
+  subTicks.forEach(tick => {
+    if (tick <= Math.pow(10, logMaxX)) {
+      const x = getX(tick);
+      ctx.beginPath();
+      ctx.moveTo(x, padding.top);
+      ctx.lineTo(x, h - padding.bottom);
+      ctx.stroke();
+      ctx.fillText(formatNumber(tick), x - 12, h - padding.bottom + 18);
+    }
+  });
+
+  // Y Axis Grid & Labels (Views)
+  const viewTicks = [10000, 100000, 1000000, 10000000];
+  viewTicks.forEach(tick => {
+    if (tick <= Math.pow(10, logMaxY)) {
+      const y = getY(tick);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(w - padding.right, y);
+      ctx.stroke();
+      ctx.fillText(formatNumber(tick), 12, y + 4);
+    }
+  });
+
+  // Axis Titles
+  ctx.fillStyle = '#949eb5';
+  ctx.fillText('채널 구독자 수 →', w / 2 - 30, h - 8);
+  ctx.save();
+  ctx.translate(14, h / 2 + 30);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('영상 조회수 →', 0, 0);
+  ctx.restore();
+
+  // Draw Reference Lines: 3x Outlier Line & 10x Mega Line
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)'; // 3x line
+  ctx.beginPath();
+  ctx.moveTo(getX(1000), getY(3000));
+  ctx.lineTo(getX(Math.pow(10, logMaxX)), getY(Math.pow(10, logMaxX) * 3));
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)'; // 10x line
+  ctx.beginPath();
+  ctx.moveTo(getX(1000), getY(10000));
+  ctx.lineTo(getX(Math.pow(10, logMaxX)), getY(Math.pow(10, logMaxX) * 10));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Plot Points
+  chartPoints = [];
+  currentVideos.forEach(v => {
+    const px = getX(v.subscriberCount);
+    const py = getY(v.viewCount);
+
+    let color = '#64748b';
+    let radius = 6;
+    if (v.outlierMultiplier >= 10.0) {
+      color = '#fbbf24';
+      radius = 9;
+    } else if (v.outlierMultiplier >= 3.0) {
+      color = '#818cf8';
+      radius = 7.5;
+    }
+
+    ctx.beginPath();
+    ctx.arc(px, py, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = radius > 6 ? 8 : 0;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    chartPoints.push({
+      x: px,
+      y: py,
+      radius: radius + 4,
+      video: v
+    });
+  });
+}
+
+function setupCanvasInteraction() {
+  if (!scatterCanvas) return;
+
+  scatterCanvas.addEventListener('mousemove', e => {
+    const rect = scatterCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const hit = chartPoints.find(p => {
+      const dx = mx - p.x;
+      const dy = my - p.y;
+      return (dx * dx + dy * dy) <= (p.radius * p.radius);
+    });
+
+    if (hit) {
+      scatterCanvas.style.cursor = 'pointer';
+      const v = hit.video;
+      scatterTooltip.style.display = 'block';
+      scatterTooltip.style.left = `${e.clientX - rect.left + 15}px`;
+      scatterTooltip.style.top = `${e.clientY - rect.top - 20}px`;
+      scatterTooltip.innerHTML = `
+        <strong>${v.title}</strong><br>
+        채널: ${v.channelTitle} (구독자 ${v.subscriberCountFormatted})<br>
+        조회수: <span style="color:#10b981;">${v.viewCountFormatted}</span> · 떡상 배수: <span style="color:#fbbf24; font-weight:700;">${v.outlierMultiplier}x</span>
+      `;
+    } else {
+      scatterCanvas.style.cursor = 'default';
+      scatterTooltip.style.display = 'none';
+    }
+  });
+
+  scatterCanvas.addEventListener('mouseleave', () => {
+    scatterTooltip.style.display = 'none';
+  });
+
+  scatterCanvas.addEventListener('click', e => {
+    const rect = scatterCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const hit = chartPoints.find(p => {
+      const dx = mx - p.x;
+      const dy = my - p.y;
+      return (dx * dx + dy * dy) <= (p.radius * p.radius);
+    });
+
+    if (hit) {
+      switchTab('explorer');
+      const card = document.getElementById(`card-${hit.video.id}`);
+      if (card) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.style.borderColor = 'var(--accent-gold)';
+        card.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.5)';
+        setTimeout(() => {
+          card.style.borderColor = '';
+          card.style.boxShadow = '';
+        }, 3000);
+      }
+    }
+  });
+}
+
+// --- CSV Export Handler (UTF-8 BOM for Excel) ---
+function handleExportCsv() {
+  if (!currentVideos || currentVideos.length === 0) {
+    alert('내보낼 검색 결과가 없습니다.');
+    return;
+  }
+
+  const headers = ['비디오ID', '제목', '채널명', '구독자수', '조회수', '떡상배수', '일일조회수증가', '숏폼여부', '재생시간(초)', '업로드일', 'URL'];
+  const rows = currentVideos.map(v => [
+    `"${v.id}"`,
+    `"${(v.title || '').replace(/"/g, '""')}"`,
+    `"${(v.channelTitle || '').replace(/"/g, '""')}"`,
+    v.subscriberCount,
+    v.viewCount,
+    v.outlierMultiplier,
+    v.viewsPerDay,
+    v.isShorts ? 'Shorts' : 'Long',
+    v.durationSec,
+    `"${v.publishedAt}"`,
+    `"${v.url}"`
+  ]);
+
+  const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `boks_youtube_${currentKeyword || 'results'}_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // --- AI Strategy Generation Handler ---

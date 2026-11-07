@@ -1,27 +1,28 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
-const ConfigManager = require('./services/config');
-const { searchYouTube } = require('./services/youtube');
-const AiCliService = require('./services/ai-cli');
+// ==========================================================================
+// BOKS YOUTUBE FINDER - Electron Main Process
+// ==========================================================================
 
-const configManager = new ConfigManager();
-const aiCliService = new AiCliService();
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const path = require('path');
+const configService = require('./services/config');
+const youtubeService = require('./services/youtube');
+const aiCliService = require('./services/ai-cli');
 
 let mainWindow = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 960,
+    width: 1340,
+    height: 900,
+    minWidth: 980,
     minHeight: 640,
     backgroundColor: '#0f1117',
-    title: 'Boks YouTube Finder',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
-    }
+    },
+    title: 'Boks YouTube Finder'
   });
 
   mainWindow.loadFile('index.html');
@@ -30,31 +31,6 @@ function createWindow() {
     mainWindow = null;
   });
 }
-
-// IPC Handlers
-ipcMain.handle('config:get', async () => {
-  return configManager.get();
-});
-
-ipcMain.handle('config:save', async (_, newConfig) => {
-  return configManager.save(newConfig);
-});
-
-ipcMain.handle('youtube:search', async (_, params) => {
-  const config = configManager.get();
-  return searchYouTube(config.youtubeApiKey, params);
-});
-
-ipcMain.handle('ai:generate-strategy', async (_, { keyword, videos }) => {
-  const config = configManager.get();
-  const engine = config.aiEngine || 'claude';
-  const customPath = engine === 'codex' ? config.codexCliPath : config.claudeCliPath;
-  return aiCliService.generateStrategy({ engine, customPath, keyword, videos });
-});
-
-ipcMain.handle('ai:detect-path', async (_, engine) => {
-  return aiCliService.detectCliPath(engine);
-});
 
 app.whenReady().then(() => {
   createWindow();
@@ -67,5 +43,48 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+// --- IPC Handlers ---
+
+ipcMain.handle('config:get', async () => {
+  return configService.loadConfig();
+});
+
+ipcMain.handle('config:save', async (event, newConfig) => {
+  return configService.saveConfig(newConfig);
+});
+
+ipcMain.handle('cli:detect-path', async (event, engine) => {
+  return aiCliService.findCliPath(engine);
+});
+
+ipcMain.handle('youtube:search', async (event, { query, maxResults, regionCode, relevanceLanguage }) => {
+  const config = configService.loadConfig();
+  const videos = await youtubeService.searchYouTube({
+    apiKey: config.youtubeApiKey,
+    query,
+    maxResults,
+    regionCode,
+    relevanceLanguage
+  });
+  const analytics = youtubeService.computeMarketAnalytics(videos);
+  return { videos, analytics };
+});
+
+ipcMain.handle('ai:generate-strategy', async (event, { keyword, videos }) => {
+  const config = configService.loadConfig();
+  return aiCliService.generateStrategy({
+    keyword,
+    videos,
+    engine: config.aiEngine,
+    customPath: config.aiEngine === 'claude' ? config.claudeCliPath : config.codexCliPath
+  });
+});
+
+ipcMain.handle('shell:open-external', async (event, url) => {
+  if (url && (url.startsWith('https://') || url.startsWith('http://'))) {
+    shell.openExternal(url);
   }
 });
