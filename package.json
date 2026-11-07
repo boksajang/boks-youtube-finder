@@ -1,0 +1,15 @@
+{
+  "name": "boks-youtube-finder",
+  "productName": "Boks YouTube Finder",
+  "version": "1.0.0",
+  "description": "유튜브 떡상 소재 자동 추천 및 채널 분석 데스크톱 앱 (Electron + YouTube Data API + Claude/Codex CLI)",
+  "author": "복사장",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
