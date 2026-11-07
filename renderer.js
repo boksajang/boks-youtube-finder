@@ -17,6 +17,8 @@ const statusText = document.getElementById('status-text');
 // Search & Filter Elements
 const searchInput = document.getElementById('search-input');
 const searchBtn = document.getElementById('search-btn');
+const categoryFilter = document.getElementById('category-filter');
+const publishedFilter = document.getElementById('published-filter');
 const regionFilter = document.getElementById('region-filter');
 const langFilter = document.getElementById('lang-filter');
 const formatBtns = document.querySelectorAll('#format-toggle .toggle-btn');
@@ -116,6 +118,14 @@ function setupEventListeners() {
   searchBtn.addEventListener('click', handleSearch);
   searchInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') handleSearch();
+  });
+
+  categoryFilter.addEventListener('change', () => {
+    if (currentVideos.length > 0) handleSearch();
+  });
+
+  publishedFilter.addEventListener('change', () => {
+    if (currentVideos.length > 0) handleSearch();
   });
 
   regionFilter.addEventListener('change', () => {
@@ -225,7 +235,9 @@ async function handleSearch() {
       query,
       maxResults: 40,
       regionCode: regionFilter.value,
-      relevanceLanguage: langFilter.value
+      relevanceLanguage: langFilter.value,
+      videoCategoryId: categoryFilter.value,
+      publishedPeriod: publishedFilter.value
     });
 
     currentVideos = res.videos || [];
@@ -236,7 +248,7 @@ async function handleSearch() {
         <div class="empty-state">
           <div class="empty-icon">🔍</div>
           <h3>검색 결과가 없습니다</h3>
-          <p>"${query}"에 대한 검색 결과가 없습니다. 국가/언어 필터나 검색어를 변경해 보세요.</p>
+          <p>"${query}"에 대한 검색 결과가 없습니다. 조건(주제, 기간, 국가)을 완화해 보세요.</p>
         </div>
       `;
       return;
@@ -334,6 +346,27 @@ function renderVideos() {
       window.api.openExternal(btn.dataset.url);
     });
   });
+
+  // Attach tag copy listeners
+  document.querySelectorAll('.btn-copy-tags').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const tags = btn.dataset.tags;
+      if (!tags) {
+        alert('이 영상에는 등록된 공개 태그가 없습니다.');
+        return;
+      }
+      navigator.clipboard.writeText(tags).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '✓ 복사완료!';
+        btn.style.borderColor = 'var(--accent-green)';
+        setTimeout(() => {
+          btn.textContent = orig;
+          btn.style.borderColor = '';
+        }, 2000);
+      });
+    });
+  });
 }
 
 function clearKeywordFilter() {
@@ -353,12 +386,14 @@ function createVideoCardHtml(v) {
   }
 
   const thumbUrl = v.thumbnails?.medium?.url || v.thumbnails?.high?.url || v.thumbnails?.default?.url || '';
+  const tagsStr = (v.tags || []).join(', ');
 
   return `
     <div class="video-card" id="card-${v.id}">
       <div class="thumb-container">
         <img src="${thumbUrl}" alt="${v.title}" loading="lazy">
         ${v.isShorts ? '<span class="badge-shorts">SHORTS</span>' : ''}
+        <span class="badge-category">${v.categoryName}</span>
         <span class="badge-duration">${v.durationFormatted}</span>
       </div>
       <div class="card-body">
@@ -377,6 +412,7 @@ function createVideoCardHtml(v) {
         </div>
         <div class="card-actions">
           <button class="btn-watch" data-url="${v.url}">유튜브에서 열기 ↗</button>
+          <button class="btn-copy-tags" data-tags="${tagsStr}" title="${tagsStr ? '태그 ' + v.tags.length + '개 복사' : '태그 없음'}">🏷️ 태그 복사</button>
         </div>
       </div>
     </div>
@@ -469,7 +505,6 @@ function renderScatterChart() {
 
   ctx.clearRect(0, 0, w, h);
 
-  // Determine Max Scales (Logarithmic Scale for YouTube data)
   const plotW = w - padding.left - padding.right;
   const plotH = h - padding.top - padding.bottom;
 
@@ -533,13 +568,13 @@ function renderScatterChart() {
 
   // Draw Reference Lines: 3x Outlier Line & 10x Mega Line
   ctx.setLineDash([4, 4]);
-  ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)'; // 3x line
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)';
   ctx.beginPath();
   ctx.moveTo(getX(1000), getY(3000));
   ctx.lineTo(getX(Math.pow(10, logMaxX)), getY(Math.pow(10, logMaxX) * 3));
   ctx.stroke();
 
-  ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)'; // 10x line
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
   ctx.beginPath();
   ctx.moveTo(getX(1000), getY(10000));
   ctx.lineTo(getX(Math.pow(10, logMaxX)), getY(Math.pow(10, logMaxX) * 10));
@@ -605,7 +640,8 @@ function setupCanvasInteraction() {
       scatterTooltip.innerHTML = `
         <strong>${v.title}</strong><br>
         채널: ${v.channelTitle} (구독자 ${v.subscriberCountFormatted})<br>
-        조회수: <span style="color:#10b981;">${v.viewCountFormatted}</span> · 떡상 배수: <span style="color:#fbbf24; font-weight:700;">${v.outlierMultiplier}x</span>
+        카테고리: ${v.categoryName} · 조회수: <span style="color:#10b981;">${v.viewCountFormatted}</span><br>
+        떡상 배수: <span style="color:#fbbf24; font-weight:700;">${v.outlierMultiplier}x</span>
       `;
     } else {
       scatterCanvas.style.cursor = 'default';
@@ -651,10 +687,11 @@ function handleExportCsv() {
     return;
   }
 
-  const headers = ['비디오ID', '제목', '채널명', '구독자수', '조회수', '떡상배수', '일일조회수증가', '숏폼여부', '재생시간(초)', '업로드일', 'URL'];
+  const headers = ['비디오ID', '제목', '카테고리', '채널명', '구독자수', '조회수', '떡상배수', '일일조회수증가', '숏폼여부', '재생시간(초)', '업로드일', '태그', 'URL'];
   const rows = currentVideos.map(v => [
     `"${v.id}"`,
     `"${(v.title || '').replace(/"/g, '""')}"`,
+    `"${v.categoryName}"`,
     `"${(v.channelTitle || '').replace(/"/g, '""')}"`,
     v.subscriberCount,
     v.viewCount,
@@ -663,6 +700,7 @@ function handleExportCsv() {
     v.isShorts ? 'Shorts' : 'Long',
     v.durationSec,
     `"${v.publishedAt}"`,
+    `"${(v.tags || []).join('; ').replace(/"/g, '""')}"`,
     `"${v.url}"`
   ]);
 

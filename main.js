@@ -12,7 +12,7 @@ let mainWindow = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1340,
+    width: 1360,
     height: 900,
     minWidth: 980,
     minHeight: 640,
@@ -60,14 +60,16 @@ ipcMain.handle('cli:detect-path', async (event, engine) => {
   return aiCliService.findCliPath(engine);
 });
 
-ipcMain.handle('youtube:search', async (event, { query, maxResults, regionCode, relevanceLanguage }) => {
+ipcMain.handle('youtube:search', async (event, { query, maxResults, regionCode, relevanceLanguage, videoCategoryId, publishedPeriod }) => {
   const config = configService.loadConfig();
   const videos = await youtubeService.searchYouTube({
     apiKey: config.youtubeApiKey,
     query,
     maxResults,
     regionCode,
-    relevanceLanguage
+    relevanceLanguage,
+    videoCategoryId,
+    publishedPeriod
   });
   const analytics = youtubeService.computeMarketAnalytics(videos);
   return { videos, analytics };

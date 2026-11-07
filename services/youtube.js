@@ -4,16 +4,41 @@
 
 const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
 
+const CATEGORY_NAMES = {
+  '1': '영화/애니',
+  '2': '자동차',
+  '10': '음악',
+  '15': '반려동물',
+  '17': '스포츠',
+  '19': '여행/이벤트',
+  '20': '게임',
+  '22': '인물/블로그',
+  '23': '코미디',
+  '24': '엔터테인먼트',
+  '25': '뉴스/정치',
+  '26': '노하우/스타일',
+  '27': '교육',
+  '28': '과학기술'
+};
+
 /**
- * Searches YouTube videos and enriches with channel stats & outlier metrics
- * Supports regional & language targeting (KR, US, JP, etc.)
+ * Searches YouTube videos and enriches with channel stats, tags, and outlier metrics.
+ * Supports regional, language, category, and date period targeting.
  */
-async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR', relevanceLanguage = 'ko' }) {
+async function searchYouTube({
+  apiKey,
+  query,
+  maxResults = 40,
+  regionCode = 'KR',
+  relevanceLanguage = 'ko',
+  videoCategoryId = '0',
+  publishedPeriod = 'all'
+}) {
   if (!apiKey) {
     throw new Error('YouTube Data API 키가 설정되지 않았습니다. [환경설정] 메뉴에서 API 키를 등록해 주세요.');
   }
 
-  // 1. Search videos by keyword with regional and language filters
+  // 1. Search videos by keyword with full enterprise filtering parameters
   let searchUrl = `${YOUTUBE_API_BASE}/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${maxResults}&key=${apiKey}`;
   
   if (regionCode && regionCode !== 'ALL') {
@@ -21,6 +46,15 @@ async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR'
   }
   if (relevanceLanguage && relevanceLanguage !== 'ALL') {
     searchUrl += `&relevanceLanguage=${encodeURIComponent(relevanceLanguage)}`;
+  }
+  if (videoCategoryId && videoCategoryId !== '0') {
+    searchUrl += `&videoCategoryId=${encodeURIComponent(videoCategoryId)}`;
+  }
+
+  // Date range filter (24h, 7d, 30d, 90d, 1y)
+  const publishedAfter = calculatePublishedAfter(publishedPeriod);
+  if (publishedAfter) {
+    searchUrl += `&publishedAfter=${encodeURIComponent(publishedAfter)}`;
   }
 
   const searchRes = await fetch(searchUrl);
@@ -35,10 +69,10 @@ async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR'
   const videoIds = items.map(item => item.id.videoId).filter(Boolean);
   const channelIds = [...new Set(items.map(item => item.snippet.channelId).filter(Boolean))];
 
-  // 2. Batch fetch video details (Duration, statistics)
+  // 2. Batch fetch video details (Duration, statistics, category, tags)
   const videoDetailsMap = await fetchVideoDetails(videoIds, apiKey);
 
-  // 3. Batch fetch channel statistics (Subscriber counts)
+  // 3. Batch fetch channel statistics (Subscriber counts, total views, video count)
   const channelDetailsMap = await fetchChannelDetails(channelIds, apiKey);
 
   // 4. Combine and compute outlier multipliers & velocity
@@ -65,6 +99,9 @@ async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR'
     const diffDays = Math.max(1, Math.round((now - publishedAt) / (1000 * 60 * 60 * 24)));
     const viewsPerDay = Math.round(viewCount / diffDays);
 
+    const catId = vDetail.categoryId || item.snippet.categoryId || '0';
+    const catName = CATEGORY_NAMES[catId] || '기타';
+
     return {
       id: videoId,
       url: `https://www.youtube.com/watch?v=${videoId}`,
@@ -72,6 +109,8 @@ async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR'
       description: item.snippet.description,
       channelId: channelId,
       channelTitle: item.snippet.channelTitle,
+      categoryId: catId,
+      categoryName: catName,
       publishedAt: item.snippet.publishedAt,
       publishedAtRelative: formatRelativeTime(publishedAt),
       publishedDayOfWeek: publishedAt.getDay(), // 0: Sun, 1: Mon, ...
@@ -97,7 +136,7 @@ async function searchYouTube({ apiKey, query, maxResults = 40, regionCode = 'KR'
 }
 
 /**
- * Batch fetch video metadata (contentDetails, statistics)
+ * Batch fetch video metadata (contentDetails, statistics, snippet)
  */
 async function fetchVideoDetails(videoIds, apiKey) {
   if (!videoIds || videoIds.length === 0) return {};
@@ -111,6 +150,7 @@ async function fetchVideoDetails(videoIds, apiKey) {
       const data = await res.json();
       (data.items || []).forEach(v => {
         result[v.id] = {
+          categoryId: v.snippet?.categoryId || '',
           durationSec: ISO8601DurationToSeconds(v.contentDetails?.duration || ''),
           viewCount: v.statistics?.viewCount || '0',
           likeCount: v.statistics?.likeCount || '0',
@@ -124,7 +164,7 @@ async function fetchVideoDetails(videoIds, apiKey) {
 }
 
 /**
- * Batch fetch channel statistics (subscriberCount)
+ * Batch fetch channel statistics (subscriberCount, videoCount, viewCount)
  */
 async function fetchChannelDetails(channelIds, apiKey) {
   if (!channelIds || channelIds.length === 0) return {};
@@ -139,7 +179,8 @@ async function fetchChannelDetails(channelIds, apiKey) {
       (data.items || []).forEach(c => {
         result[c.id] = {
           subscriberCount: c.statistics?.subscriberCount || '0',
-          videoCount: c.statistics?.videoCount || '0'
+          videoCount: c.statistics?.videoCount || '0',
+          totalViewCount: c.statistics?.viewCount || '0'
         };
       });
     }
@@ -258,6 +299,16 @@ function extractTitleKeywords(videos) {
 }
 
 // --- Utilities ---
+
+function calculatePublishedAfter(period) {
+  const now = Date.now();
+  if (period === '24h') return new Date(now - 24 * 3600 * 1000).toISOString();
+  if (period === '7d') return new Date(now - 7 * 24 * 3600 * 1000).toISOString();
+  if (period === '30d') return new Date(now - 30 * 24 * 3600 * 1000).toISOString();
+  if (period === '90d') return new Date(now - 90 * 24 * 3600 * 1000).toISOString();
+  if (period === '1y') return new Date(now - 365 * 24 * 3600 * 1000).toISOString();
+  return null;
+}
 
 function chunkArray(array, size) {
   const result = [];

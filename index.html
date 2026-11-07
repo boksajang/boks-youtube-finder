@@ -47,7 +47,7 @@
           <div class="status-dot"></div>
           <span id="status-text">API 확인 중...</span>
         </div>
-        <div class="version-tag">v1.2.0 · 복사장 에디션</div>
+        <div class="version-tag">v1.4.0 · 복사장 에디션</div>
       </div>
     </aside>
 
@@ -64,6 +64,33 @@
         </div>
 
         <div class="filter-bar">
+          <div class="filter-group">
+            <span class="filter-label">주제/카테고리:</span>
+            <select id="category-filter" class="select-control">
+              <option value="0" selected>전체 주제</option>
+              <option value="28">💻 과학기술 (AI·IT·개발)</option>
+              <option value="26">💡 노하우·스타일 (부업·팁)</option>
+              <option value="27">📚 교육 (강의·공부)</option>
+              <option value="24">🎭 엔터테인먼트</option>
+              <option value="22">👤 인물·블로그 (Vlog)</option>
+              <option value="20">🎮 게임</option>
+              <option value="25">📰 뉴스·정치</option>
+              <option value="10">🎵 음악</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">업로드 기간:</span>
+            <select id="published-filter" class="select-control">
+              <option value="all" selected>전체 기간</option>
+              <option value="24h">최근 24시간</option>
+              <option value="7d">최근 7일 (1주)</option>
+              <option value="30d">최근 30일 (1개월)</option>
+              <option value="90d">최근 90일 (3개월)</option>
+              <option value="1y">최근 1년</option>
+            </select>
+          </div>
+
           <div class="filter-group">
             <span class="filter-label">국가:</span>
             <select id="region-filter" class="select-control">
