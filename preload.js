@@ -4,18 +4,36 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
+
 contextBridge.exposeInMainWorld('api', {
   // Config
-  getConfig: () => ipcRenderer.invoke('config:get'),
-  saveConfig: (newConfig) => ipcRenderer.invoke('config:save', newConfig),
+  getConfig: () => invoke('config:get'),
+  saveConfig: (config) => invoke('config:save', config),
+  detectCliPath: (engine) => invoke('cli:detect-path', { engine }),
 
-  // YouTube Search & Analytics
-  searchYouTube: (params) => ipcRenderer.invoke('youtube:search', params),
+  // YouTube
+  searchYouTube: (params) => invoke('youtube:search', params),
 
-  // AI CLI Strategy Engine
-  generateStrategy: (params) => ipcRenderer.invoke('ai:generate-strategy', params),
+  // AI CLI
+  generateStrategy: (params) => invoke('ai:generate-strategy', params),
+  cancelStrategy: () => invoke('ai:cancel'),
 
-  // System Helpers
-  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
-  detectCliPath: (engine) => ipcRenderer.invoke('cli:detect-path', engine)
+  // Files & shell
+  saveCsv: (defaultName, content) => invoke('csv:save', { defaultName, content }),
+  openExternal: (url) => invoke('shell:open-external', { url }),
+  showItemInFolder: (filePath) => invoke('shell:show-item', { filePath }),
+
+  // Window controls
+  window: {
+    minimize: () => invoke('win:minimize'),
+    toggleMaximize: () => invoke('win:toggle-maximize'),
+    close: () => invoke('win:close'),
+    state: () => invoke('win:state'),
+    onMaximizedChange: (cb) => {
+      const listener = (_e, maximized) => cb(maximized);
+      ipcRenderer.on('win:maximized-changed', listener);
+      return () => ipcRenderer.removeListener('win:maximized-changed', listener);
+    }
+  }
 });

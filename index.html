@@ -2,209 +2,266 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://i.ytimg.com https://*.ytimg.com; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Boks YouTube Finder</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-layout">
-    <!-- Top Minimal Sticky Bar -->
-    <header class="app-header">
-      <div class="header-brand">
-        <span class="brand-badge">⚡ BOKS FINDER</span>
+  <!-- Icon sprite -->
+  <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24"><rect x="5" y="9" width="10" height="10" rx="1"/><path d="M9 9V6a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-3"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="7.5" cy="7.5" r="1.5"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/></symbol>
+    <symbol id="i-trend" viewBox="0 0 24 24"><path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16"/><circle cx="9" cy="14" r="1.5"/><circle cx="13" cy="10" r="1.5"/><circle cx="17" cy="7" r="1.5"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M14 9l2 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20z"/><path d="M12 10v5M12 18v.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
+  </svg>
+
+  <div class="app">
+    <!-- Custom title bar -->
+    <header class="titlebar" id="titlebar">
+      <div class="titlebar-brand">
+        <img src="assets/icon.png" alt="" class="titlebar-icon">
+        <span class="titlebar-name">Boks YouTube Finder</span>
+        <span class="titlebar-sub">유튜브 떡상 소재 분석</span>
       </div>
-
-      <div class="search-container">
-        <span class="search-icon">🔎</span>
-        <input type="text" id="search-input" placeholder="키워드 하나만 입력하세요 (예: AI 부업, 쇼츠 자동화, 롱폼 편집)" autofocus>
-        <button id="search-btn" class="btn-search">
-          <span>🚀 떡상 분석</span>
-        </button>
-      </div>
-
-      <!-- Quick Compact Filters (Minimal Input) -->
-      <div class="quick-filters">
-        <div class="chip-group" id="format-toggle">
-          <button class="chip-btn active" data-format="all">전체</button>
-          <button class="chip-btn" data-format="long">롱폼</button>
-          <button class="chip-btn" data-format="shorts">쇼츠</button>
-        </div>
-
-        <select id="outlier-filter" class="mini-select">
-          <option value="3.0" selected>⚡ 3배 이상</option>
-          <option value="5.0">🔥 5배 이상</option>
-          <option value="10.0">🚀 10배 이상</option>
-          <option value="0">전체 배수</option>
-        </select>
-
-        <select id="category-filter" class="mini-select">
-          <option value="0" selected>전체 주제</option>
-          <option value="28">💻 과학기술 (AI·IT)</option>
-          <option value="26">💡 노하우 (부업·팁)</option>
-          <option value="27">📚 교육</option>
-          <option value="24">🎭 엔터</option>
-          <option value="22">👤 블로그</option>
-        </select>
-
-        <select id="published-filter" class="mini-select">
-          <option value="all" selected>전체 기간</option>
-          <option value="7d">최근 7일</option>
-          <option value="30d">최근 30일</option>
-          <option value="90d">최근 90일</option>
-        </select>
-
-        <select id="region-filter" class="mini-select" style="display: none;">
-          <option value="KR" selected>KR</option>
-        </select>
-        <select id="lang-filter" class="mini-select" style="display: none;">
-          <option value="ko" selected>ko</option>
-        </select>
-        <select id="sort-filter" class="mini-select" style="display: none;">
-          <option value="outlier" selected>배수순</option>
-        </select>
-      </div>
-
-      <!-- Header Action Utilities -->
-      <div class="header-actions">
-        <button id="btn-export-csv" class="btn-icon" title="엑셀 CSV 다운로드">📥 CSV</button>
-        <button id="btn-open-settings" class="btn-icon" title="환경설정">⚙️ 설정</button>
+      <div class="win-controls" id="win-controls">
+        <button class="win-btn" id="win-min" title="최소화" aria-label="최소화"><svg><use href="#i-min"/></svg></button>
+        <button class="win-btn" id="win-max" title="최대화" aria-label="최대화"><svg><use href="#i-max"/></svg></button>
+        <button class="win-btn win-close" id="win-close" title="닫기" aria-label="닫기"><svg><use href="#i-close"/></svg></button>
       </div>
     </header>
 
-    <!-- Main All-In-One Dashboard Body (Single-Pane of Glass) -->
-    <main class="dashboard-body">
-      <!-- Section 1: Triad Insight Dashboard ( 한눈에 보는 핵심 인사이트 3개 ) -->
-      <section class="insight-triad" id="insight-triad" style="display: none;">
-        <!-- Insight Card 1: Market Opportunity Gauge -->
-        <div class="insight-card card-opportunity">
-          <div class="card-title-row">
-            <span class="card-badge-title">🎯 시장 진입 기회</span>
-            <span id="gauge-level-badge" class="status-pill">분석 대기</span>
-          </div>
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <form class="search-box" id="search-form" autocomplete="off">
+        <svg class="search-icon"><use href="#i-search"/></svg>
+        <input type="text" id="search-input" maxlength="100" placeholder="분석할 키워드를 입력하세요 (예: AI 부업)" aria-label="검색 키워드">
+        <button type="submit" id="search-btn" class="btn btn-primary">
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span class="btn-label">분석하기</span>
+        </button>
+      </form>
 
-          <div class="gauge-meter">
-            <div id="gauge-bar-fill" class="gauge-fill" style="width: 0%;"></div>
-          </div>
-
-          <div class="gauge-values">
-            <span id="gauge-score-text" class="score-highlight">0점</span>
-            <span id="metric-small-share" class="sub-text">소형 채널 점유율 0%</span>
-          </div>
-
-          <p id="gauge-advice-text" class="card-advice">키워드를 검색하면 시장 기회도를 분석합니다.</p>
-        </div>
-
-        <!-- Insight Card 2: 2D Outlier Scatter Plot -->
-        <div class="insight-card card-scatter">
-          <div class="card-title-row">
-            <span class="card-badge-title">📊 떡상 매트릭스 (구독자 vs 조회수)</span>
-            <span class="legend-tag"><span class="dot-gold"></span>10x+ <span class="dot-indigo"></span>3x+</span>
-          </div>
-          <div class="scatter-box">
-            <canvas id="scatter-canvas" width="460" height="130"></canvas>
-            <div id="scatter-tooltip" class="chart-tooltip" style="display: none;"></div>
+      <div class="filters">
+        <div class="field" title="쇼츠는 3분 이하 영상으로 추정합니다">
+          <span class="field-label">형식</span>
+          <div class="segmented" id="format-toggle" role="group" aria-label="영상 형식">
+            <button type="button" class="seg-btn active" data-format="all">전체</button>
+            <button type="button" class="seg-btn" data-format="long">롱폼</button>
+            <button type="button" class="seg-btn" data-format="shorts">쇼츠</button>
           </div>
         </div>
+        <label class="field" title="떡상 = 조회수 1만 회 이상이면서 그 채널 평소 조회수(같은 형식 최근 영상 중앙값)의 기준 배수 이상인 영상입니다. 평소 조회수를 알 수 없는 채널은 구독자 대비 배수로 추정합니다. '전체'를 고르면 모든 영상을 보여 줍니다.">
+          <span class="field-label">떡상 배수</span>
+          <select id="outlier-filter" class="select">
+            <option value="3" selected>3배 이상</option>
+            <option value="5">5배 이상</option>
+            <option value="10">10배 이상</option>
+            <option value="0">전체</option>
+          </select>
+        </label>
+        <label class="field" title="바꾸면 자동으로 다시 검색합니다">
+          <span class="field-label">주제</span>
+          <select id="category-filter" class="select">
+            <option value="0" selected>전체</option>
+            <option value="28">과학기술</option>
+            <option value="26">노하우/스타일</option>
+            <option value="27">교육</option>
+            <option value="22">인물/블로그</option>
+            <option value="24">엔터테인먼트</option>
+            <option value="20">게임</option>
+            <option value="10">음악</option>
+            <option value="25">뉴스/정치</option>
+            <option value="23">코미디</option>
+          </select>
+        </label>
+        <label class="field" title="바꾸면 자동으로 다시 검색합니다">
+          <span class="field-label">기간</span>
+          <select id="published-filter" class="select">
+            <option value="all" selected>전체</option>
+            <option value="24h">24시간</option>
+            <option value="7d">7일</option>
+            <option value="30d">30일</option>
+            <option value="90d">90일</option>
+            <option value="1y">1년</option>
+          </select>
+        </label>
+      </div>
 
-        <!-- Insight Card 3: Cheat-Key Keywords & Fast Stats -->
-        <div class="insight-card card-keywords">
-          <div class="card-title-row">
-            <span class="card-badge-title">🏷️ 제목 치트키 키워드 TOP 8</span>
-            <span class="sub-text" id="kpi-outlier-count">떡상 영상 0개</span>
+      <div class="toolbar-actions">
+        <button type="button" id="btn-export-csv" class="btn btn-ghost" disabled title="검색 결과를 Excel에서 열 수 있는 CSV로 저장">
+          <svg><use href="#i-download"/></svg><span>CSV 저장</span>
+        </button>
+        <button type="button" id="btn-open-settings" class="btn btn-ghost" title="API 키·AI 엔진 설정">
+          <svg><use href="#i-settings"/></svg><span>설정</span><span class="dot-alert" id="settings-alert" hidden></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Dashboard -->
+    <main class="dashboard" id="dashboard">
+      <section class="insights" id="insights" hidden>
+        <!-- 1. Opportunity -->
+        <article class="card card-opportunity">
+          <div class="card-head">
+            <h2 class="card-title"><svg><use href="#i-target"/></svg>시장 진입 기회</h2>
+            <span class="pill" id="gauge-level">-</span>
           </div>
-          <div id="keyword-chips-container" class="keyword-chips">
-            <span class="empty-hint">검색 시 자동 추출</span>
+          <div class="score-row">
+            <span class="score" id="gauge-score">0</span><span class="score-unit">/ 100</span>
+            <button class="icon-hint" type="button" title="소형 채널(구독자 2만 이하) 영상 비중 × 60 + 소형 채널 떡상(조회수 1만 회 이상 · 채널 평소의 3배 이상) 영상 비중 × 2 × 40 (최대 100점). 채널 규모는 구독자 수로 나누므로 구독자 비공개 채널은 제외합니다."><svg><use href="#i-info"/></svg></button>
           </div>
-          <div class="kpi-mini-bar">
-            <span>최고 배수 <strong id="kpi-max-ratio" style="color:var(--accent-gold);">0x</strong></span>
-            <span>평균 조회 <strong id="kpi-avg-views">0</strong></span>
-            <span>평균 구독자 <strong id="kpi-avg-subs">0</strong></span>
+          <div class="gauge"><div class="gauge-fill" id="gauge-fill"></div></div>
+          <dl class="metric-list">
+            <div><dt>소형 채널 영상 비중</dt><dd id="metric-small-share">-</dd></div>
+            <div><dt>소형 채널 떡상 영상</dt><dd id="metric-small-outliers">-</dd></div>
+          </dl>
+          <p class="card-note" id="gauge-advice"></p>
+        </article>
+
+        <!-- 2. Scatter -->
+        <article class="card card-scatter">
+          <div class="card-head">
+            <h2 class="card-title" title="가로축 채널 평소 조회수(같은 형식 최근 영상 중앙값), 세로축 영상 조회수 (로그 눈금)"><svg><use href="#i-chart"/></svg>채널 평소 대비 조회수 분포</h2>
+            <div class="legend">
+              <span><i class="lg lg-mega"></i>10배+</span>
+              <span><i class="lg lg-high"></i>3배+</span>
+              <span><i class="lg lg-norm"></i>그 외</span>
+              <span><i class="lg lg-dim"></i>필터 제외</span>
+            </div>
           </div>
-        </div>
+          <div class="scatter-box" id="scatter-box">
+            <canvas id="scatter-canvas"></canvas>
+            <div id="scatter-tooltip" class="chart-tooltip" hidden></div>
+          </div>
+          <p class="card-note" id="scatter-note">점선: 채널 평소의 1·3·10배 · 점을 누르면 영상으로 이동</p>
+        </article>
+
+        <!-- 3. Keywords -->
+        <article class="card card-keywords">
+          <div class="card-head">
+            <h2 class="card-title"><svg><use href="#i-tag"/></svg>제목 반복 키워드</h2>
+            <span class="card-caption" id="keyword-basis"></span>
+          </div>
+          <div class="chips" id="keyword-chips"></div>
+          <div class="kpis">
+            <div><span>떡상 영상</span><strong id="kpi-outliers">0</strong></div>
+            <div title="떡상 판정 대상 영상 중 가장 높은 평소 대비 배수"><span>최고 배수</span><strong id="kpi-max" class="t-gold">-</strong></div>
+            <div><span>평균 조회수</span><strong id="kpi-avg-views">0</strong></div>
+            <div><span>구독자 중앙값</span><strong id="kpi-median-subs">0</strong></div>
+          </div>
+        </article>
       </section>
 
-      <!-- Section 2: Unified Two-Column Workbench ( 떡상 영상 피드 + AI 기획안 나란히 ) -->
-      <section class="workbench-grid" id="workbench-grid">
-        <!-- Left: Verified Outlier Video Feed -->
-        <div class="workbench-left">
-          <div class="column-header">
-            <h3>🔥 떡상 아웃라이어 피드 (<span id="feed-count">0</span>)</h3>
-            <span class="header-desc">구독자 대비 조회수 폭발 순</span>
+      <section class="workbench" id="workbench">
+        <!-- Feed -->
+        <div class="panel panel-feed">
+          <div class="panel-head">
+            <h2 class="panel-title"><svg><use href="#i-trend"/></svg>떡상 영상 <span class="count" id="feed-count"></span></h2>
+            <label class="field field-compact">
+              <span class="field-label">정렬</span>
+              <select id="sort-select" class="select">
+                <option value="ratio" selected>평소 대비 배수 순</option>
+                <option value="subs">구독자 대비 배수 순</option>
+                <option value="views">조회수 많은 순</option>
+                <option value="velocity">하루 조회수 순</option>
+                <option value="recent">최신 업로드 순</option>
+              </select>
+            </label>
           </div>
-
-          <div id="video-feed" class="video-cards-list">
-            <div class="empty-dashboard-state">
-              <div class="empty-icon">⚡</div>
-              <h3>키워드 하나만 검색창에 입력해 보세요</h3>
-              <p>유료 툴 필요 없이, 떡상 아웃라이어 분석부터 실전 기획안까지 한 화면에 즉시 펼쳐집니다.</p>
-            </div>
+          <div class="filter-bar" id="filter-bar" hidden>
+            <span>키워드 필터</span>
+            <button type="button" class="chip chip-active" id="filter-clear" title="필터 해제"><span id="filter-word"></span><svg><use href="#i-close"/></svg></button>
           </div>
+          <div class="feed" id="video-feed" tabindex="-1"></div>
         </div>
 
-        <!-- Right: Real-time AI Action Plans (Side-by-Side) -->
-        <div class="workbench-right">
-          <div class="column-header">
-            <h3>✨ AI 실전 추천 기획안</h3>
-            <button id="btn-re-ai" class="btn-action-small">🔄 재도출</button>
-          </div>
-
-          <div id="ai-plans-container" class="ai-plans-panel">
-            <div class="ai-placeholder-box">
-              <span class="ai-icon-large">💡</span>
-              <p>키워드를 검색하면 로컬 Claude/Codex CLI가 상위 떡상 영상들을 분석하여 <strong>제목 후보, 썸네일 컨셉, 10초 오프닝 훅</strong>을 이곳에 바로 뽑아냅니다.</p>
+        <!-- AI -->
+        <div class="panel panel-ai">
+          <div class="panel-head">
+            <h2 class="panel-title"><svg><use href="#i-spark"/></svg>AI 기획안 <span class="pill pill-muted" id="ai-engine-pill">Claude</span></h2>
+            <div class="panel-actions">
+              <button type="button" id="btn-ai-stop" class="btn btn-ghost btn-sm" hidden><svg><use href="#i-stop"/></svg><span>중지</span></button>
+              <button type="button" id="btn-ai-run" class="btn btn-ghost btn-sm" disabled><svg><use href="#i-refresh"/></svg><span>다시 생성</span></button>
             </div>
           </div>
+          <div class="ai-body" id="ai-body"></div>
         </div>
       </section>
     </main>
 
-    <!-- Settings Modal (Clean Slide-Over Drawer, No Clutter) -->
-    <div id="settings-modal" class="modal-backdrop" style="display: none;">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h3>⚙️ 환경설정</h3>
-          <button id="btn-close-settings" class="btn-close">✕</button>
+    <!-- Settings -->
+    <div class="modal" id="settings-modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="modal-head">
+          <h2 id="settings-title">설정</h2>
+          <button type="button" class="icon-btn" id="btn-close-settings" title="닫기 (Esc)" aria-label="닫기"><svg><use href="#i-close"/></svg></button>
         </div>
         <div class="modal-body">
-          <div class="form-item">
-            <label>YouTube Data API v3 Key</label>
-            <div class="input-with-action">
-              <input type="password" id="setting-api-key" placeholder="AIzaSy...">
-              <button id="btn-toggle-key" class="btn-sub">보기</button>
+          <section class="form-section">
+            <label class="form-label" for="setting-api-key"><svg><use href="#i-key"/></svg>YouTube Data API 키</label>
+            <div class="input-row">
+              <input type="password" id="setting-api-key" class="input" placeholder="AIza로 시작하는 39자리 키" spellcheck="false">
+              <button type="button" id="btn-toggle-key" class="btn btn-ghost btn-sm">보기</button>
             </div>
-            <span class="form-hint">Google Cloud에서 무료 발급 (하루 10,000 유닛, 약 100회 검색)</span>
-          </div>
+            <p class="form-hint">Google Cloud 콘솔에서 무료로 발급합니다. 기본 한도는 검색 하루 100회, 영상·채널 조회 하루 10,000 유닛이며 분석 1회에 검색 1회와 조회 약 2~85 유닛을 씁니다(채널 평소 조회수는 24시간 동안 저장해 다시 쓰므로 같은 채널은 추가 비용이 없습니다).
+              <button type="button" class="link-btn" id="btn-open-console">발급 페이지 열기<svg><use href="#i-external"/></svg></button>
+            </p>
+            <p class="form-hint" id="key-storage-hint"></p>
+          </section>
 
-          <div class="form-item">
-            <label>로컬 AI 엔진 (종량제 과금 0원)</label>
-            <div class="radio-row">
-              <label><input type="radio" name="ai-engine" value="claude" checked> Claude CLI</label>
-              <label><input type="radio" name="ai-engine" value="codex"> Codex CLI</label>
+          <section class="form-section">
+            <span class="form-label">AI 엔진 <small>설치된 CLI를 사용하므로 별도 API 요금이 없습니다</small></span>
+            <div class="segmented segmented-lg" id="engine-toggle" role="radiogroup">
+              <button type="button" class="seg-btn" data-engine="claude" role="radio">Claude CLI</button>
+              <button type="button" class="seg-btn" data-engine="codex" role="radio">Codex CLI</button>
             </div>
-          </div>
+          </section>
 
-          <div class="form-item">
-            <label>Claude CLI 경로</label>
-            <div class="input-with-action">
-              <input type="text" id="setting-claude-path" placeholder="claude (자동 탐색)">
-              <button class="btn-sub btn-detect" data-engine="claude">탐색</button>
+          <section class="form-section">
+            <label class="form-label" for="setting-claude-path">Claude CLI 경로</label>
+            <div class="input-row">
+              <input type="text" id="setting-claude-path" class="input" placeholder="비워 두면 자동으로 찾습니다" spellcheck="false">
+              <button type="button" class="btn btn-ghost btn-sm btn-detect" data-engine="claude">자동 찾기</button>
             </div>
-          </div>
+            <p class="form-hint" id="detect-claude-status"></p>
+          </section>
 
-          <div class="form-item">
-            <label>Codex CLI 경로</label>
-            <div class="input-with-action">
-              <input type="text" id="setting-codex-path" placeholder="codex (자동 탐색)">
-              <button class="btn-sub btn-detect" data-engine="codex">탐색</button>
+          <section class="form-section">
+            <label class="form-label" for="setting-codex-path">Codex CLI 경로</label>
+            <div class="input-row">
+              <input type="text" id="setting-codex-path" class="input" placeholder="비워 두면 자동으로 찾습니다" spellcheck="false">
+              <button type="button" class="btn btn-ghost btn-sm btn-detect" data-engine="codex">자동 찾기</button>
             </div>
-          </div>
+            <p class="form-hint" id="detect-codex-status"></p>
+          </section>
         </div>
-        <div class="modal-footer">
-          <button id="save-settings-btn" class="btn-primary-small">저장</button>
-          <span id="save-feedback" class="save-feedback-text"></span>
+        <div class="modal-foot">
+          <span class="form-feedback" id="save-feedback"></span>
+          <button type="button" id="btn-cancel-settings" class="btn btn-ghost">취소</button>
+          <button type="button" id="save-settings-btn" class="btn btn-primary">저장</button>
         </div>
       </div>
     </div>
+
+    <div class="toast-host" id="toast-host" aria-live="polite"></div>
   </div>
 
   <script src="renderer.js"></script>

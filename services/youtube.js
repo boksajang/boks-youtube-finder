@@ -1,376 +1,592 @@
 // ==========================================================================
-// BOKS YOUTUBE FINDER - YouTube Data API v3 Service & Advanced Analytics
+// BOKS YOUTUBE FINDER - YouTube Data API v3 Service & Market Analytics
 // ==========================================================================
 
 const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
+const REQUEST_TIMEOUT_MS = 15000;
+
+// YouTube Shorts 최대 길이(2024-10 이후 3분). API에 쇼츠 여부 필드가 없어 길이로 추정한다.
+const SHORTS_MAX_SEC = 180;
+const SMALL_CHANNEL_MAX_SUBS = 20000;
+const OUTLIER_RATIO = 3.0;
+// 떡상 판정 최소 조회수: 구독자 1명·조회수 104회 같은 소규모 노이즈가 "104배"로 잡히는 것을 막는다
+const MIN_OUTLIER_VIEWS = 10000;
+
+// 채널 평소 조회수(메인 지표) = 같은 형식(쇼츠/롱폼) 최근 영상 조회수의 중앙값
+const BASELINE_FETCH_PER_CHANNEL = 30;  // 업로드 목록에서 가져올 최근 영상 수
+const BASELINE_SAMPLE_MAX = 15;         // 중앙값 계산에 쓰는 최근 영상 수
+const BASELINE_SAMPLE_MIN = 5;          // 이보다 적으면 구독자 대비 배수로 대신(추정)
+const BASELINE_MIN_AGE_MS = 48 * 3600 * 1000; // 막 올라와 조회수가 쌓이는 중인 영상 제외
+const BASELINE_FLOOR = 1000;            // 평소 조회수가 아주 낮은 채널의 배수 과장을 막는 하한
+const BASELINE_CONCURRENCY = 8;
 
 const CATEGORY_NAMES = {
-  '1': '영화/애니',
-  '2': '자동차',
-  '10': '음악',
-  '15': '반려동물',
-  '17': '스포츠',
-  '19': '여행/이벤트',
-  '20': '게임',
-  '22': '인물/블로그',
-  '23': '코미디',
-  '24': '엔터테인먼트',
-  '25': '뉴스/정치',
-  '26': '노하우/스타일',
-  '27': '교육',
-  '28': '과학기술'
+  '1': '영화/애니', '2': '자동차', '10': '음악', '15': '반려동물', '17': '스포츠',
+  '19': '여행/이벤트', '20': '게임', '22': '인물/블로그', '23': '코미디', '24': '엔터테인먼트',
+  '25': '뉴스/정치', '26': '노하우/스타일', '27': '교육', '28': '과학기술', '29': '비영리/사회운동'
 };
 
+class YouTubeApiError extends Error {
+  constructor(message, code, detail = '') {
+    super(message);
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+// --- HTTP ---
+
+function explainApiError(status, body) {
+  const err = body && body.error ? body.error : {};
+  const reason = (err.errors && err.errors[0] && err.errors[0].reason) || err.status || '';
+  const raw = err.message || '';
+
+  if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+    return new YouTubeApiError('오늘 YouTube API 사용 한도를 모두 썼습니다(기본 한도: 검색 하루 100회, 조회 하루 10,000 유닛). 매일 오후 4~5시(한국 시간)에 초기화됩니다.', 'QUOTA_EXCEEDED', raw);
+  }
+  if (reason === 'keyInvalid' || /API key not valid/i.test(raw)) {
+    return new YouTubeApiError('YouTube API 키가 올바르지 않습니다. [설정]에서 키를 다시 확인해 주세요.', 'KEY_INVALID', raw);
+  }
+  if (reason === 'accessNotConfigured' || /has not been used|is disabled/i.test(raw)) {
+    return new YouTubeApiError('Google Cloud 프로젝트에서 "YouTube Data API v3"가 사용 설정되지 않았습니다. 콘솔에서 사용 설정 후 다시 시도해 주세요.', 'API_DISABLED', raw);
+  }
+  if (reason === 'ipRefererBlocked' || reason === 'forbidden' || status === 403) {
+    return new YouTubeApiError('API 키 사용 제한(IP·리퍼러·API 제한) 때문에 요청이 거부되었습니다. 키의 애플리케이션 제한을 확인해 주세요.', 'FORBIDDEN', raw);
+  }
+  return new YouTubeApiError(`YouTube API 요청에 실패했습니다 (HTTP ${status}).`, 'API_ERROR', raw);
+}
+
+async function apiGet(endpoint, params, apiKey) {
+  const qs = new URLSearchParams({ ...params, key: apiKey });
+  let res;
+  try {
+    res = await fetch(`${YOUTUBE_API_BASE}/${endpoint}?${qs}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  } catch (err) {
+    if (err.name === 'TimeoutError') throw new YouTubeApiError('YouTube 서버 응답이 15초 안에 오지 않았습니다. 잠시 후 다시 시도해 주세요.', 'TIMEOUT');
+    throw new YouTubeApiError('YouTube 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.', 'NETWORK', err.message);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = explainApiError(res.status, body);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// --- Search ---
+
 /**
- * Searches YouTube videos and enriches with channel stats, tags, and outlier metrics.
- * Supports regional, language, category, and date period targeting.
+ * 키워드로 영상을 검색하고 채널 구독자·영상 통계를 합쳐 떡상 지표를 계산한다.
+ * search.list 의 제목은 HTML 이스케이프되어 오므로 videos.list 의 원문 snippet 을 사용한다.
  */
-async function searchYouTube({
-  apiKey,
-  query,
-  maxResults = 40,
-  regionCode = 'KR',
-  relevanceLanguage = 'ko',
-  videoCategoryId = '0',
-  publishedPeriod = 'all'
-}) {
+async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', channelCache = null }) {
   if (!apiKey) {
-    throw new Error('YouTube Data API 키가 설정되지 않았습니다. [환경설정] 메뉴에서 API 키를 등록해 주세요.');
+    throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
 
-  // 1. Search videos by keyword with full enterprise filtering parameters
-  let searchUrl = `${YOUTUBE_API_BASE}/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${maxResults}&key=${apiKey}`;
-  
-  if (regionCode && regionCode !== 'ALL') {
-    searchUrl += `&regionCode=${encodeURIComponent(regionCode)}`;
-  }
-  if (relevanceLanguage && relevanceLanguage !== 'ALL') {
-    searchUrl += `&relevanceLanguage=${encodeURIComponent(relevanceLanguage)}`;
-  }
-  if (videoCategoryId && videoCategoryId !== '0') {
-    searchUrl += `&videoCategoryId=${encodeURIComponent(videoCategoryId)}`;
-  }
-
-  // Date range filter (24h, 7d, 30d, 90d, 1y)
+  const params = { part: 'snippet', q: query, type: 'video', maxResults: String(Math.min(50, Math.max(1, maxResults))) };
+  if (regionCode && regionCode !== 'ALL') params.regionCode = regionCode;
+  if (relevanceLanguage && relevanceLanguage !== 'ALL') params.relevanceLanguage = relevanceLanguage;
+  if (videoCategoryId && videoCategoryId !== '0') params.videoCategoryId = videoCategoryId;
   const publishedAfter = calculatePublishedAfter(publishedPeriod);
-  if (publishedAfter) {
-    searchUrl += `&publishedAfter=${encodeURIComponent(publishedAfter)}`;
-  }
+  if (publishedAfter) params.publishedAfter = publishedAfter;
 
-  const searchRes = await fetch(searchUrl);
-  if (!searchRes.ok) {
-    const errorData = await searchRes.json().catch(() => ({}));
-    throw new Error(`YouTube API 검색 실패 (${searchRes.status}): ${errorData.error?.message || searchRes.statusText}`);
-  }
-  const searchData = await searchRes.json();
-  const items = searchData.items || [];
-  if (items.length === 0) return [];
+  const searchData = await apiGet('search', params, apiKey);
+  const items = (searchData.items || []).filter(it => it.id && it.id.videoId);
+  if (items.length === 0) return { videos: [], excluded: { live: 0 }, baseline: emptyBaselineStats() };
 
-  const videoIds = items.map(item => item.id.videoId).filter(Boolean);
-  const channelIds = [...new Set(items.map(item => item.snippet.channelId).filter(Boolean))];
+  const videoIds = [...new Set(items.map(it => it.id.videoId))];
+  const channelIds = [...new Set(items.map(it => it.snippet.channelId).filter(Boolean))];
 
-  // 2. Batch fetch video details (Duration, statistics, category, tags)
-  const videoDetailsMap = await fetchVideoDetails(videoIds, apiKey);
+  const [videoMap, channelMap] = await Promise.all([
+    fetchVideoDetails(videoIds, apiKey),
+    fetchChannelDetails(channelIds, apiKey)
+  ]);
+  // 채널 평소 조회수 수집은 실패해도 검색 전체를 실패시키지 않는다(구독자 대비로 대신)
+  const { uploadsByChannel, stats: baseline } = await fetchChannelUploads(channelMap, apiKey, channelCache);
 
-  // 3. Batch fetch channel statistics (Subscriber counts, total views, video count)
-  const channelDetailsMap = await fetchChannelDetails(channelIds, apiKey);
+  const now = Date.now();
+  const videos = [];
+  let liveExcluded = 0;
+  const searchSnippet = Object.fromEntries(items.map(it => [it.id.videoId, it.snippet || {}]));
 
-  // 4. Combine and compute outlier multipliers & velocity
-  const now = new Date();
-  const enrichedVideos = items.map(item => {
-    const videoId = item.id.videoId;
-    const channelId = item.snippet.channelId;
-    const vDetail = videoDetailsMap[videoId] || {};
-    const cDetail = channelDetailsMap[channelId] || {};
-
-    const viewCount = parseInt(vDetail.viewCount || '0', 10);
-    const subscriberCount = parseInt(cDetail.subscriberCount || '0', 10);
-    const durationSec = vDetail.durationSec || 0;
-    const isShorts = durationSec > 0 && durationSec <= 60;
-
-    // Outlier multiplier: views / subscribers (defaults to 1.0 if subscriberCount unknown)
-    let outlierMultiplier = 1.0;
-    if (subscriberCount > 0) {
-      outlierMultiplier = Math.round((viewCount / subscriberCount) * 10) / 10;
+  for (const id of videoIds) {
+    const v = videoMap[id];
+    if (!v) continue; // 삭제·비공개 전환된 영상
+    // videos.list 값이 비어 있으면 search.list 값으로 보완(제목은 이스케이프 해제)
+    const fb = searchSnippet[id] || {};
+    v.channelId = v.channelId || fb.channelId || '';
+    v.channelTitle = v.channelTitle || decodeEntities(fb.channelTitle);
+    v.title = v.title || decodeEntities(fb.title);
+    v.publishedAt = v.publishedAt || fb.publishedAt;
+    if (!v.thumbnails || !Object.keys(v.thumbnails).length) v.thumbnails = fb.thumbnails || {};
+    if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') {
+      liveExcluded++;
+      continue;
     }
+    const ch = channelMap[v.channelId] || { subscriberCount: null };
 
-    // Velocity: views per day
-    const publishedAt = new Date(item.snippet.publishedAt);
-    const diffDays = Math.max(1, Math.round((now - publishedAt) / (1000 * 60 * 60 * 24)));
-    const viewsPerDay = Math.round(viewCount / diffDays);
+    const viewCount = v.viewCount;
+    const subscriberCount = ch.subscriberCount; // null = 비공개/알 수 없음
+    const subsRatio = subscriberCount && subscriberCount > 0 ? round1(viewCount / subscriberCount) : null;
 
-    const catId = vDetail.categoryId || item.snippet.categoryId || '0';
-    const catName = CATEGORY_NAMES[catId] || '기타';
+    const publishedAt = new Date(v.publishedAt);
+    const ageDays = Math.max(1, (now - publishedAt.getTime()) / 86400000);
+    const viewsPerDay = Number.isFinite(ageDays) ? Math.round(viewCount / ageDays) : 0;
+    // 쇼츠는 최대 3분이므로 길이로만 판정한다(설명란 #shorts 때문에 롱폼을 쇼츠 표본과 비교하지 않도록)
+    const isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
 
-    return {
-      id: videoId,
-      url: `https://www.youtube.com/watch?v=${videoId}`,
-      title: item.snippet.title,
-      description: item.snippet.description,
-      channelId: channelId,
-      channelTitle: item.snippet.channelTitle,
-      categoryId: catId,
-      categoryName: catName,
-      publishedAt: item.snippet.publishedAt,
-      publishedAtRelative: formatRelativeTime(publishedAt),
-      publishedDayOfWeek: publishedAt.getDay(), // 0: Sun, 1: Mon, ...
-      publishedHour: publishedAt.getHours(),
-      thumbnails: item.snippet.thumbnails,
-      durationSec: durationSec,
-      durationFormatted: formatDuration(durationSec),
-      isShorts: isShorts,
-      viewCount: viewCount,
+    // 메인 지표: 같은 채널·같은 형식의 최근 영상 중앙값 대비 배수
+    // 업로드 통계가 캐시에서 왔으면 '48시간 경과' 판정도 그 수집 시각 기준으로 한다
+    const chUploads = uploadsByChannel[v.channelId];
+    const base = chUploads ? computeChannelBaseline(chUploads.uploads, { videoId: id, isShorts, now: chUploads.asOf }) : null;
+    const baselineRatio = base ? round1(viewCount / Math.max(base.median, BASELINE_FLOOR)) : null;
+    const scoreBasis = baselineRatio !== null ? 'baseline' : subsRatio !== null ? 'subs' : null;
+    const score = baselineRatio !== null ? baselineRatio : subsRatio;
+
+    videos.push({
+      id,
+      url: `https://www.youtube.com/watch?v=${id}`,
+      title: v.title,
+      channelId: v.channelId,
+      channelTitle: v.channelTitle,
+      categoryId: v.categoryId,
+      categoryName: CATEGORY_NAMES[v.categoryId] || '기타',
+      publishedAt: v.publishedAt,
+      publishedAtRelative: formatRelativeTime(publishedAt, now),
+      thumbnail: pickThumbnail(v.thumbnails),
+      durationSec: v.durationSec,
+      durationFormatted: formatDuration(v.durationSec),
+      isShorts,
+      viewCount,
       viewCountFormatted: formatNumber(viewCount),
-      subscriberCount: subscriberCount,
-      subscriberCountFormatted: formatNumber(subscriberCount),
-      likeCount: parseInt(vDetail.likeCount || '0', 10),
-      commentCount: parseInt(vDetail.commentCount || '0', 10),
-      outlierMultiplier: outlierMultiplier,
-      viewsPerDay: viewsPerDay,
+      subscriberCount,
+      subscriberCountFormatted: subscriberCount === null ? '비공개' : formatNumber(subscriberCount),
+      likeCount: v.likeCount,
+      commentCount: v.commentCount,
+      // 메인 점수(채널 평소 대비, 계산 불가 시 구독자 대비로 대신)
+      score,
+      scoreFormatted: formatMultiplier(score),
+      scoreBasis, // 'baseline' | 'subs'(추정) | null
+      channelBaseline: base ? base.median : null,
+      channelBaselineFormatted: base ? formatNumber(base.median) : '-',
+      baselineSampleSize: base ? base.sampleSize : 0,
+      // 보조 지표(구독자 대비)
+      subsRatio,
+      subsRatioFormatted: formatMultiplier(subsRatio),
+      // 떡상 판정 대상: 점수를 계산할 수 있고 조회수가 하한선 이상
+      qualifies: score !== null && viewCount >= MIN_OUTLIER_VIEWS,
+      viewsPerDay,
       viewsPerDayFormatted: formatNumber(viewsPerDay),
-      tags: vDetail.tags || []
-    };
-  });
+      tags: v.tags
+    });
+  }
 
-  return enrichedVideos;
+  return { videos, excluded: { live: liveExcluded }, baseline };
+}
+
+function round1(x) {
+  return Math.round(x * 10) / 10;
+}
+
+function emptyBaselineStats() {
+  return { channels: 0, cached: 0, fetched: 0, failed: 0, quotaHit: false };
 }
 
 /**
- * Batch fetch video metadata (contentDetails, statistics, snippet)
+ * 채널 평소 조회수: 후보 영상 자신·48시간 미만·길이 0(라이브/예정) 영상을 빼고
+ * 같은 형식(쇼츠 ≤180초 / 롱폼)의 최근 최대 15개 조회수 중앙값. 표본이 5개 미만이면 null.
  */
+function computeChannelBaseline(uploads, { videoId, isShorts, now = Date.now() }) {
+  if (!Array.isArray(uploads) || uploads.length === 0) return null;
+  const sample = uploads
+    .filter(u => Array.isArray(u) && u.length === 4)
+    .filter(([id, views, dur, pub]) =>
+      id !== videoId &&
+      typeof views === 'number' &&
+      dur > 0 &&
+      (dur <= SHORTS_MAX_SEC) === isShorts &&
+      Number.isFinite(pub) && now - pub >= BASELINE_MIN_AGE_MS)
+    .sort((a, b) => b[3] - a[3])
+    .slice(0, BASELINE_SAMPLE_MAX)
+    .map(u => u[1])
+    .sort((a, b) => a - b);
+  if (sample.length < BASELINE_SAMPLE_MIN) return null;
+  const mid = Math.floor(sample.length / 2);
+  const median = sample.length % 2 ? sample[mid] : Math.round((sample[mid - 1] + sample[mid]) / 2);
+  return { median, sampleSize: sample.length };
+}
+
+/**
+ * 채널별 최근 업로드 통계 수집: uploads 재생목록(playlistItems) → videos.list(통계·길이).
+ * 24시간 캐시를 먼저 쓰고, 쿼터 초과 시 나머지 채널은 건너뛴다.
+ * 반환: uploadsByChannel[channelId] = { asOf: 수집 시각(ms), uploads: [[videoId, views|null, durationSec, publishedAtMs], ...] }
+ */
+async function fetchChannelUploads(channelMap, apiKey, cache) {
+  const stats = emptyBaselineStats();
+  const uploadsByChannel = {};
+  const pending = [];
+  for (const [cid, ch] of Object.entries(channelMap)) {
+    stats.channels++;
+    const hit = cache ? cache.get(cid) : null;
+    if (hit) {
+      uploadsByChannel[cid] = { asOf: hit.t, uploads: hit.u };
+      stats.cached++;
+    } else if (ch.uploadsPlaylistId) {
+      pending.push([cid, ch.uploadsPlaylistId]);
+    } else {
+      stats.failed++;
+    }
+  }
+  if (pending.length === 0) return { uploadsByChannel, stats };
+
+  const onError = (err, cid) => {
+    if (err.code === 'QUOTA_EXCEEDED') stats.quotaHit = true;
+    else console.warn(`[youtube] 채널 업로드 수집 실패 ${cid}: ${err.code} ${err.detail || err.message}`);
+  };
+
+  // 1) 채널별 최근 업로드 영상 id
+  const lists = await mapLimit(pending, BASELINE_CONCURRENCY, async ([cid, playlistId]) => {
+    if (stats.quotaHit) return null;
+    try {
+      const data = await apiGet('playlistItems', { part: 'contentDetails', playlistId, maxResults: String(BASELINE_FETCH_PER_CHANNEL) }, apiKey);
+      return (data.items || []).map(it => it.contentDetails && it.contentDetails.videoId).filter(Boolean);
+    } catch (err) {
+      // 업로드 재생목록이 없는 채널(404)은 빈 목록으로 확정해 캐시한다
+      if (err.status === 404) return [];
+      onError(err, cid);
+      return null;
+    }
+  });
+
+  // 2) 모은 영상의 조회수·길이·게시일
+  const allIds = [...new Set(lists.filter(Boolean).flat())];
+  const statMap = {};
+  const failedIds = new Set();
+  await mapLimit(chunkArray(allIds, 50), 4, async (chunk) => {
+    if (stats.quotaHit) { chunk.forEach(id => failedIds.add(id)); return; }
+    try {
+      const data = await apiGet('videos', { part: 'snippet,contentDetails,statistics', fields: 'items(id,snippet/publishedAt,contentDetails/duration,statistics/viewCount)', id: chunk.join(',') }, apiKey);
+      for (const it of data.items || []) {
+        const vc = it.statistics && it.statistics.viewCount;
+        statMap[it.id] = [
+          it.id,
+          vc === undefined ? null : toInt(vc),
+          parseIsoDuration(it.contentDetails && it.contentDetails.duration),
+          Date.parse(it.snippet && it.snippet.publishedAt)
+        ];
+      }
+    } catch (err) {
+      chunk.forEach(id => failedIds.add(id));
+      onError(err, 'videos');
+    }
+  });
+
+  const asOf = Date.now();
+  pending.forEach(([cid], i) => {
+    const ids = lists[i];
+    if (!ids) { stats.failed++; return; }
+    const uploads = ids.map(id => statMap[id]).filter(Boolean);
+    uploadsByChannel[cid] = { asOf, uploads };
+    // 통계 일부가 빠진 채널은 있는 만큼만 쓰고 캐시하지 않는다(다음 검색에서 다시 수집)
+    if (ids.some(id => failedIds.has(id))) { stats.failed++; return; }
+    stats.fetched++;
+    if (cache) cache.set(cid, uploads);
+  });
+  if (cache) cache.flush();
+  return { uploadsByChannel, stats };
+}
+
 async function fetchVideoDetails(videoIds, apiKey) {
-  if (!videoIds || videoIds.length === 0) return {};
-  const chunks = chunkArray(videoIds, 50);
   const result = {};
-
-  for (const chunk of chunks) {
-    const url = `${YOUTUBE_API_BASE}/videos?part=contentDetails,statistics,snippet&id=${chunk.join(',')}&key=${apiKey}`;
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      (data.items || []).forEach(v => {
-        result[v.id] = {
-          categoryId: v.snippet?.categoryId || '',
-          durationSec: ISO8601DurationToSeconds(v.contentDetails?.duration || ''),
-          viewCount: v.statistics?.viewCount || '0',
-          likeCount: v.statistics?.likeCount || '0',
-          commentCount: v.statistics?.commentCount || '0',
-          tags: v.snippet?.tags || []
-        };
-      });
+  for (const chunk of chunkArray(videoIds, 50)) {
+    const data = await apiGet('videos', { part: 'snippet,contentDetails,statistics', id: chunk.join(',') }, apiKey);
+    for (const v of data.items || []) {
+      const s = v.snippet || {};
+      result[v.id] = {
+        title: s.title || '',
+        description: s.description || '',
+        channelId: s.channelId || '',
+        channelTitle: s.channelTitle || '',
+        categoryId: s.categoryId || '0',
+        publishedAt: s.publishedAt,
+        thumbnails: s.thumbnails || {},
+        liveBroadcastContent: s.liveBroadcastContent || 'none',
+        tags: Array.isArray(s.tags) ? s.tags : [],
+        durationSec: parseIsoDuration(v.contentDetails && v.contentDetails.duration),
+        viewCount: toInt(v.statistics && v.statistics.viewCount),
+        likeCount: toInt(v.statistics && v.statistics.likeCount),
+        commentCount: toInt(v.statistics && v.statistics.commentCount)
+      };
     }
   }
   return result;
 }
 
-/**
- * Batch fetch channel statistics (subscriberCount, videoCount, viewCount)
- */
 async function fetchChannelDetails(channelIds, apiKey) {
-  if (!channelIds || channelIds.length === 0) return {};
-  const chunks = chunkArray(channelIds, 50);
   const result = {};
-
-  for (const chunk of chunks) {
-    const url = `${YOUTUBE_API_BASE}/channels?part=statistics&id=${chunk.join(',')}&key=${apiKey}`;
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      (data.items || []).forEach(c => {
-        result[c.id] = {
-          subscriberCount: c.statistics?.subscriberCount || '0',
-          videoCount: c.statistics?.videoCount || '0',
-          totalViewCount: c.statistics?.viewCount || '0'
-        };
-      });
+  for (const chunk of chunkArray(channelIds, 50)) {
+    const data = await apiGet('channels', { part: 'statistics,contentDetails', id: chunk.join(',') }, apiKey);
+    for (const c of data.items || []) {
+      const st = c.statistics || {};
+      const related = (c.contentDetails && c.contentDetails.relatedPlaylists) || {};
+      result[c.id] = {
+        subscriberCount: st.hiddenSubscriberCount || st.subscriberCount === undefined ? null : toInt(st.subscriberCount),
+        uploadsPlaylistId: related.uploads || ''
+      };
     }
   }
   return result;
 }
 
-// --- Advanced Market Analytics ---
+// --- Market Analytics ---
 
 /**
- * Analyzes market competition and small creator opportunity score
+ * 시장 진입 기회 지수 (0~100)
+ *   = 소형 채널(구독 2만 이하) 영상 비중 × 60
+ *   + 소형 채널 떡상(조회수 1만 이상 & 평소 대비 3배 이상) 영상 비중 × 2(최대 100%) × 40
+ * 채널 규모는 구독자 수로 나누므로 구독자 비공개 채널은 이 계산에서 제외한다.
  */
-function computeMarketAnalytics(videos) {
-  if (!videos || videos.length === 0) {
+function computeMarketAnalytics(videos, query = '') {
+  videos = videos || [];
+  // 점수(평소 대비 또는 구독자 대비)를 계산할 수 있는 영상
+  const known = videos.filter(v => typeof v.score === 'number');
+  // 떡상 = 조회수 하한선 이상 & 메인 점수 3배 이상
+  const isOutlier = v => v.qualifies && v.score >= OUTLIER_RATIO;
+  const outliers = known.filter(isOutlier);
+  const avgViews = videos.length ? Math.round(videos.reduce((s, v) => s + v.viewCount, 0) / videos.length) : 0;
+  const baselineCount = videos.filter(v => v.scoreBasis === 'baseline').length;
+  const estimatedCount = videos.filter(v => v.scoreBasis === 'subs').length;
+  // 채널 규모를 알 수 있는 영상(구독자 공개)
+  const sized = known.filter(v => typeof v.subscriberCount === 'number' && v.subscriberCount > 0);
+
+  // 떡상 영상이 충분하면 그 제목에서, 반복 키워드가 3개 미만이면 전체 제목에서 추출
+  let keywordSource = outliers.length >= 5 ? outliers : videos;
+  let topKeywords = extractTitleKeywords(keywordSource, query);
+  if (keywordSource !== videos && topKeywords.length < 3) {
+    keywordSource = videos;
+    topKeywords = extractTitleKeywords(videos, query);
+  }
+  // 최고 배수도 하한선을 넘은 영상 중에서만 계산
+  const qualified = known.filter(v => v.qualifies);
+  const maxMultiplier = qualified.length ? qualified.reduce((m, v) => Math.max(m, v.score), 0) : null;
+
+  const common = {
+    knownCount: known.length,
+    sizedCount: sized.length,
+    hiddenCount: videos.length - sized.length,
+    baselineCount,
+    estimatedCount,
+    outlierCount: outliers.length,
+    maxMultiplier,
+    maxMultiplierFormatted: formatMultiplier(maxMultiplier),
+    avgViewsFormatted: formatNumber(avgViews),
+    topKeywords,
+    keywordBasis: keywordSource === videos ? 'all' : 'outliers',
+    keywordBasisCount: keywordSource.length,
+    minOutlierViews: MIN_OUTLIER_VIEWS
+  };
+
+  // 기회 지수만 채널 규모(구독자 수)가 필요하다. 나머지 지표는 그대로 보여 준다.
+  if (sized.length === 0) {
     return {
+      ...common,
       opportunityScore: 0,
-      opportunityLevel: '데이터 없음',
-      smallChannelShare: 0,
-      avgViews: 0,
-      avgSubscribers: 0,
-      topKeywords: [],
-      dayDistribution: [0, 0, 0, 0, 0, 0, 0]
+      opportunityLevel: '데이터 부족',
+      opportunityTone: 'neutral',
+      opportunityAdvice: known.length === 0
+        ? '채널 평소 조회수와 구독자 수를 확인할 수 있는 영상이 없어 시장을 평가하지 못했습니다.'
+        : '구독자 수가 공개된 채널이 없어 채널 규모별 시장을 평가하지 못했습니다.',
+      smallChannelShare: 0, smallChannelCount: 0, smallOutlierCount: 0, smallOutlierShare: 0,
+      medianSubscribersFormatted: '-'
     };
   }
 
-  const total = videos.length;
-  // Small channels: subscribers under 20,000
-  const smallChannels = videos.filter(v => v.subscriberCount > 0 && v.subscriberCount <= 20000);
-  const smallChannelShare = Math.round((smallChannels.length / total) * 100);
+  const small = sized.filter(v => v.subscriberCount <= SMALL_CHANNEL_MAX_SUBS);
+  const smallOutliers = small.filter(isOutlier);
+  const smallShare = small.length / sized.length;
+  const smallOutlierShare = smallOutliers.length / sized.length;
+  const score = Math.round(Math.min(100, smallShare * 60 + Math.min(1, smallOutlierShare * 2) * 40));
 
-  // Outliers among small channels (>= 3.0x)
-  const smallOutliers = smallChannels.filter(v => v.outlierMultiplier >= 3.0);
-
-  // Calculate Opportunity Score (0 to 100)
-  let score = Math.min(100, Math.round(smallChannelShare * 1.1 + (smallOutliers.length / total) * 45));
   let level = '경쟁 보통';
-  let levelColor = '#f59e0b';
-  let advice = '적절한 틈새 키워드와 썸네일로 공략 가능한 시장입니다.';
-
+  let tone = 'mid';
+  let advice = '틈새 키워드와 차별화된 썸네일로 충분히 공략할 수 있는 시장입니다.';
   if (score >= 60) {
-    level = '기회 매우 높음 (빈집 털이 최적 🟢)';
-    levelColor = '#10b981';
-    advice = '구독자 적은 하꼬 채널들이 높은 조회수를 쓸어담고 있는 알짜 시장입니다!';
-  } else if (score <= 30) {
-    level = '경쟁 극심 (대형 채널 독점 🔴)';
-    levelColor = '#ff2e4d';
-    advice = '대형 채널들이 상단을 장악하고 있어 세부 서브 키워드로 우회 진입을 권장합니다.';
+    level = '기회 높음';
+    tone = 'good';
+    advice = '구독자가 적은 채널도 높은 조회수를 얻고 있습니다. 지금 진입하기 좋은 시장입니다.';
+  } else if (score < 30) {
+    level = '경쟁 치열';
+    tone = 'bad';
+    advice = '대형 채널이 상위를 차지하고 있습니다. 더 좁은 세부 키워드로 우회 진입을 권장합니다.';
   }
 
-  // Averages
-  const totalViews = videos.reduce((sum, v) => sum + v.viewCount, 0);
-  const totalSubs = videos.reduce((sum, v) => sum + v.subscriberCount, 0);
-  const avgViews = Math.round(totalViews / total);
-  const avgSubscribers = Math.round(totalSubs / total);
-
-  // Keyword extraction from titles
-  const topKeywords = extractTitleKeywords(videos);
-
-  // Day of week distribution (0: Sun, 1: Mon, ... 6: Sat)
-  const dayDistribution = [0, 0, 0, 0, 0, 0, 0];
-  videos.forEach(v => {
-    if (v.publishedDayOfWeek !== undefined) {
-      dayDistribution[v.publishedDayOfWeek]++;
-    }
-  });
+  const subsSorted = sized.map(v => v.subscriberCount).sort((a, b) => a - b);
+  const medianSubs = subsSorted[Math.floor(subsSorted.length / 2)];
 
   return {
+    ...common,
     opportunityScore: score,
     opportunityLevel: level,
-    opportunityColor: levelColor,
+    opportunityTone: tone,
     opportunityAdvice: advice,
-    smallChannelShare: smallChannelShare,
-    smallChannelCount: smallChannels.length,
+    smallChannelShare: Math.round(smallShare * 100),
+    smallChannelCount: small.length,
     smallOutlierCount: smallOutliers.length,
-    avgViews: avgViews,
-    avgViewsFormatted: formatNumber(avgViews),
-    avgSubscribers: avgSubscribers,
-    avgSubscribersFormatted: formatNumber(avgSubscribers),
-    topKeywords: topKeywords,
-    dayDistribution: dayDistribution
+    smallOutlierShare: Math.round(smallOutlierShare * 100),
+    medianSubscribersFormatted: formatNumber(medianSubs)
   };
 }
 
-/**
- * Extracts high-frequency hooking keywords from titles
- */
-function extractTitleKeywords(videos) {
-  const stopWords = new Set([
-    '수', '있는', '하는', '이', '그', '저', '것', '및', '을', '를', '에', '의', '가', '은', '는', '으로', '로',
-    '에서', '과', '와', '도', '다', 'vs', 'ep', 'shorts', '쇼츠', '영상', '대한', '방법', '이유', '어떻게',
-    '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '년', '월', '일', '개', '화', '전'
-  ]);
+// --- Keyword Extraction ---
 
-  const freqMap = {};
-  videos.forEach(v => {
-    const words = v.title
-      .replace(/[\[\]\(\)\{\}\<\>\|\#\!\?\.\,\~\+\-\_\/\"\:\;\★\🔥\⚡]/g, ' ')
-      .split(/\s+/)
-      .map(w => w.trim().toLowerCase())
-      .filter(w => w.length >= 2 && !stopWords.has(w));
+const STOP_WORDS = new Set([
+  // 한국어 일반어·기능어
+  '있는', '하는', '없는', '되는', '위한', '대한', '통해', '그냥', '정말', '진짜', '지금', '이거', '이것', '그거', '이런', '그런',
+  '모든', '가장', '많이', '너무', '하면', '해서', '하고', '합니다', '입니다', '있습니다', '없습니다', '했습니다', '됩니다',
+  '영상', '방법', '이유', '어떻게', '무엇', '뭐가', '것은', '것이', '경우', '오늘', '이번', '우리', '저는', '제가', '내가',
+  '쇼츠', '숏츠', '구독', '좋아요', '알림', '설정', '최신판',
+  '만에', '하나', '한번', '이제', '바로', '같은', '하기', '하세요', '해야', '해보니', '했더니', '봤습니다', '드립니다', '알려드립니다',
+  // 영어 기능어
+  'the', 'a', 'an', 'to', 'of', 'in', 'on', 'and', 'or', 'for', 'with', 'you', 'your', 'how', 'is', 'are', 'this', 'that',
+  'my', 'i', 'it', 'its', 'be', 'from', 'at', 'by', 'what', 'why', 'shorts', 'short', 'vs', 'ep', 'feat'
+]);
 
-    const uniqueWords = new Set(words);
-    uniqueWords.forEach(w => {
-      freqMap[w] = (freqMap[w] || 0) + 1;
-    });
-  });
+// 조사·어미 (긴 것부터 검사)
+const KO_SUFFIXES = ['에서는', '으로는', '에게서', '이라고', '에서', '으로', '에게', '까지', '부터', '처럼', '보다', '이나', '라고',
+  '하는', '하고', '해서', '하면', '이다', '은', '는', '이', '가', '을', '를', '에', '의', '도', '만', '로', '와', '과', '나'];
 
-  return Object.entries(freqMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([word, count]) => ({
-      word,
-      count,
-      percent: Math.round((count / videos.length) * 100)
-    }));
+function normalizeToken(token) {
+  let t = token.toLowerCase();
+  if (/[가-힣]$/.test(t)) {
+    for (const suf of KO_SUFFIXES) {
+      if (t.length - suf.length >= 2 && t.endsWith(suf)) {
+        t = t.slice(0, -suf.length);
+        break;
+      }
+    }
+  }
+  return t;
+}
+
+function tokenize(text) {
+  return (String(text).match(/[\p{L}\p{N}]+/gu) || []).map(normalizeToken);
+}
+
+function extractTitleKeywords(videos, query = '') {
+  const queryTokens = new Set(tokenize(query));
+  const freq = new Map();
+
+  for (const v of videos) {
+    const unique = new Set(
+      tokenize(v.title).filter(w =>
+        w.length >= 2 &&
+        !/^\d+$/.test(w) &&
+        !STOP_WORDS.has(w) &&
+        !queryTokens.has(w)
+      )
+    );
+    unique.forEach(w => freq.set(w, (freq.get(w) || 0) + 1));
+  }
+
+  return [...freq.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ko'))
+    .slice(0, 8)
+    .map(([word, count]) => ({ word, count, percent: Math.round((count / videos.length) * 100) }));
 }
 
 // --- Utilities ---
 
 function calculatePublishedAfter(period) {
-  const now = Date.now();
-  if (period === '24h') return new Date(now - 24 * 3600 * 1000).toISOString();
-  if (period === '7d') return new Date(now - 7 * 24 * 3600 * 1000).toISOString();
-  if (period === '30d') return new Date(now - 30 * 24 * 3600 * 1000).toISOString();
-  if (period === '90d') return new Date(now - 90 * 24 * 3600 * 1000).toISOString();
-  if (period === '1y') return new Date(now - 365 * 24 * 3600 * 1000).toISOString();
-  return null;
+  const DAY = 86400000;
+  const spans = { '24h': 1, '7d': 7, '30d': 30, '90d': 90, '1y': 365 };
+  return spans[period] ? new Date(Date.now() - spans[period] * DAY).toISOString() : null;
 }
 
 function chunkArray(array, size) {
-  const result = [];
-  for (let i = 0; i < array.length; i += size) {
-    result.push(array.slice(i, i + size));
-  }
-  return result;
+  const out = [];
+  for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
+  return out;
 }
 
-function ISO8601DurationToSeconds(durationStr) {
-  if (!durationStr) return 0;
-  const match = durationStr.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!match) return 0;
-  const hours = parseInt(match[1] || '0', 10);
-  const minutes = parseInt(match[2] || '0', 10);
-  const seconds = parseInt(match[3] || '0', 10);
-  return hours * 3600 + minutes * 60 + seconds;
+function toInt(v) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function formatDuration(totalSeconds) {
-  if (!totalSeconds || totalSeconds <= 0) return '0:00';
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const secStr = seconds < 10 ? `0${seconds}` : `${seconds}`;
+function pickThumbnail(t = {}) {
+  return (t.medium && t.medium.url) || (t.high && t.high.url) || (t.default && t.default.url) || '';
+}
 
-  if (hours > 0) {
-    const minStr = minutes < 10 ? `0${minutes}` : `${minutes}`;
-    return `${hours}:${minStr}:${secStr}`;
-  }
-  return `${minutes}:${secStr}`;
+// ISO 8601 (P#DT#H#M#S, P0D)
+function parseIsoDuration(str) {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(str || '');
+  if (!m) return 0;
+  return toInt(m[1]) * 86400 + toInt(m[2]) * 3600 + toInt(m[3]) * 60 + toInt(m[4]);
+}
+
+function formatDuration(total) {
+  if (!total || total <= 0) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 function formatNumber(num) {
   if (!num || num <= 0) return '0';
-  if (num >= 100000000) {
-    return `${(num / 100000000).toFixed(1)}억`.replace('.0억', '억');
-  }
-  if (num >= 10000) {
-    return `${(num / 10000).toFixed(1)}만`.replace('.0만', '만');
-  }
-  return num.toLocaleString();
+  if (num >= 100000000) return `${(num / 100000000).toFixed(1).replace(/\.0$/, '')}억`;
+  if (num >= 10000) return `${(num / 10000).toFixed(1).replace(/\.0$/, '')}만`;
+  return num.toLocaleString('ko-KR');
 }
 
-function formatRelativeTime(date) {
-  const now = new Date();
-  const diffSec = Math.floor((now - date) / 1000);
-  if (diffSec < 60) return '방금 전';
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}분 전`;
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `${diffHour}시간 전`;
-  const diffDay = Math.floor(diffHour / 24);
-  if (diffDay < 30) return `${diffDay}일 전`;
-  const diffMonth = Math.floor(diffDay / 30);
-  if (diffMonth < 12) return `${diffMonth}개월 전`;
-  const diffYear = Math.floor(diffDay / 365);
-  return `${diffYear}년 전`;
+function formatMultiplier(x) {
+  if (x === null || x === undefined) return '-';
+  if (x >= 100) return `${Math.round(x).toLocaleString('ko-KR')}배`;
+  return `${x.toFixed(1).replace(/\.0$/, '')}배`;
+}
+
+function decodeEntities(s) {
+  return String(s || '')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+function formatRelativeTime(date, now = Date.now()) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+  const sec = Math.floor((now - date.getTime()) / 1000);
+  if (sec < 60) return '방금 전';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}분 전`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}시간 전`;
+  const day = Math.floor(hour / 24);
+  if (day < 30) return `${day}일 전`;
+  if (day < 365) return `${Math.min(11, Math.floor(day / 30))}개월 전`;
+  return `${Math.floor(day / 365)}년 전`;
 }
 
 module.exports = {
   searchYouTube,
   computeMarketAnalytics,
-  extractTitleKeywords
+  extractTitleKeywords,
+  // 테스트용
+  _internal: { parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
 };

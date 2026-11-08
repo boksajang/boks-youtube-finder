@@ -1,0 +1,5 @@
+node_modules/
+# 앱 데이터(설정·암호화된 API 키·Electron 캐시) — 커밋 금지
+app-data/
+# 개발 점검·E2E 산출물 — 커밋 금지
+.dev/
