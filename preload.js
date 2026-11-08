@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // YouTube
   searchYouTube: (params) => invoke('youtube:search', params),
+  getUsage: () => invoke('usage:get'),
 
   // AI CLI
   generateStrategy: (params) => invoke('ai:generate-strategy', params),

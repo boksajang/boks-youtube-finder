@@ -14,7 +14,14 @@ const configService = require('./services/config');
 const youtubeService = require('./services/youtube');
 const { createChannelCache } = require('./services/channel-cache');
 const aiCliService = require('./services/ai-cli');
+const { computeTrends } = require('./services/trends');
+const { createUsageCounter } = require('./services/usage');
 const channelCache = createChannelCache(paths.channelCacheFile);
+const usage = createUsageCounter(paths.usageFile);
+youtubeService.setUsageRecorder(endpoint => usage.record(endpoint));
+
+const FORMATS = ['all', 'long', 'shorts'];
+const safeFormat = f => (FORMATS.includes(f) ? f : 'all');
 
 const isMac = process.platform === 'darwin';
 const ICON_PATH = path.join(__dirname, 'assets', isMac ? 'icon.png' : (process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
@@ -126,29 +133,38 @@ ipcMain.handle('config:save', wrap((cfg) => {
 
 ipcMain.handle('cli:detect-path', wrap(({ engine }) => aiCliService.detectCliPath(engine === 'codex' ? 'codex' : 'claude')));
 
-ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod }) => {
+ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, format }) => {
   const q = String(query || '').trim().slice(0, 100);
   if (!q) throw Object.assign(new Error('검색할 키워드를 입력해 주세요.'), { code: 'EMPTY_QUERY' });
   const config = configService.loadConfig();
-  const result = await youtubeService.searchYouTube({
-    apiKey: config.youtubeApiKey,
-    query: q,
-    maxResults: 50,
-    regionCode: 'KR',
-    relevanceLanguage: 'ko',
-    videoCategoryId: String(videoCategoryId || '0'),
-    publishedPeriod: String(publishedPeriod || 'all'),
-    channelCache
-  });
-  const analytics = youtubeService.computeMarketAnalytics(result.videos, q);
-  return { videos: result.videos, excluded: result.excluded, baseline: result.baseline, analytics };
+  try {
+    const result = await youtubeService.searchYouTube({
+      apiKey: config.youtubeApiKey,
+      query: q,
+      maxResults: 50,
+      regionCode: 'KR',
+      relevanceLanguage: 'ko',
+      videoCategoryId: String(videoCategoryId || '0'),
+      publishedPeriod: String(publishedPeriod || 'all'),
+      format: safeFormat(format),
+      channelCache
+    });
+    const analytics = youtubeService.computeMarketAnalytics(result.videos, q);
+    const trends = computeTrends(result.videos, result.format);
+    return { videos: result.videos, excluded: result.excluded, baseline: result.baseline, format: result.format, analytics, trends, usage: usage.snapshot() };
+  } finally {
+    usage.flush();
+  }
 }));
 
-ipcMain.handle('ai:generate-strategy', wrap(({ keyword, videos }) => {
+ipcMain.handle('usage:get', wrap(() => usage.snapshot()));
+
+ipcMain.handle('ai:generate-strategy', wrap(({ keyword, videos, format }) => {
   const config = configService.loadConfig();
   return aiCliService.generateStrategy({
     keyword: String(keyword || ''),
-    videos: Array.isArray(videos) ? videos.slice(0, 60) : [],
+    format: safeFormat(format),
+    videos: Array.isArray(videos) ? videos.slice(0, 150) : [],
     engine: config.aiEngine,
     customPath: config.aiEngine === 'codex' ? config.codexCliPath : config.claudeCliPath,
     workDir: paths.aiWorkspace

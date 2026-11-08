@@ -24,6 +24,8 @@ const paths = {
   aiWorkspace: path.join(dataDir, 'ai-workspace'),
   // 채널 평소 조회수(최근 업로드 통계) 24시간 캐시
   channelCacheFile: path.join(dataDir, 'cache', 'channel-baselines.json'),
+  // 이 PC의 YouTube API 일일 사용량(태평양 시간 기준)
+  usageFile: path.join(dataDir, 'usage.json'),
   // 이전 버전이 사용하던 %APPDATA% 설정 파일(읽기 전용 이관용)
   legacyConfigFile: () => path.join(app.getPath('appData'), 'Boks YouTube Finder', 'boks-youtube-finder-config.json')
 };

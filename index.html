@@ -41,6 +41,7 @@
         <span class="titlebar-name">Boks YouTube Finder</span>
         <span class="titlebar-sub">유튜브 떡상 소재 분석</span>
       </div>
+      <div class="usage-meter" id="usage-meter" hidden></div>
       <div class="win-controls" id="win-controls">
         <button class="win-btn" id="win-min" title="최소화" aria-label="최소화"><svg><use href="#i-min"/></svg></button>
         <button class="win-btn" id="win-max" title="최대화" aria-label="최대화"><svg><use href="#i-max"/></svg></button>
@@ -60,12 +61,23 @@
       </form>
 
       <div class="filters">
-        <div class="field" title="쇼츠는 3분 이하 영상으로 추정합니다">
+        <div class="field" title="검색 조건입니다. 바꾸면 그 형식만 다시 검색합니다. 쇼츠 = 3분 이하. 검색 할당량: 전체 3회 · 롱폼 2회 · 쇼츠 2회">
           <span class="field-label">형식</span>
           <div class="segmented" id="format-toggle" role="group" aria-label="영상 형식">
             <button type="button" class="seg-btn active" data-format="all">전체</button>
             <button type="button" class="seg-btn" data-format="long">롱폼</button>
             <button type="button" class="seg-btn" data-format="shorts">쇼츠</button>
+          </div>
+        </div>
+        <div class="field" title="업로드 기간입니다. 바꾸면 다시 검색합니다">
+          <span class="field-label">기간</span>
+          <div class="segmented" id="period-toggle" role="group" aria-label="업로드 기간">
+            <button type="button" class="seg-btn" data-period="24h">24시간</button>
+            <button type="button" class="seg-btn" data-period="7d">7일</button>
+            <button type="button" class="seg-btn" data-period="30d">30일</button>
+            <button type="button" class="seg-btn" data-period="90d">90일</button>
+            <button type="button" class="seg-btn" data-period="1y">1년</button>
+            <button type="button" class="seg-btn active" data-period="all">전체</button>
           </div>
         </div>
         <label class="field" title="떡상 = 조회수 1만 회 이상이면서 그 채널 평소 조회수(같은 형식 최근 영상 중앙값)의 기준 배수 이상인 영상입니다. 평소 조회수를 알 수 없는 채널은 구독자 대비 배수로 추정합니다. '전체'를 고르면 모든 영상을 보여 줍니다.">
@@ -90,17 +102,6 @@
             <option value="10">음악</option>
             <option value="25">뉴스/정치</option>
             <option value="23">코미디</option>
-          </select>
-        </label>
-        <label class="field" title="바꾸면 자동으로 다시 검색합니다">
-          <span class="field-label">기간</span>
-          <select id="published-filter" class="select">
-            <option value="all" selected>전체</option>
-            <option value="24h">24시간</option>
-            <option value="7d">7일</option>
-            <option value="30d">30일</option>
-            <option value="90d">90일</option>
-            <option value="1y">1년</option>
           </select>
         </label>
       </div>
@@ -141,16 +142,19 @@
           <div class="card-head">
             <h2 class="card-title" title="가로축 채널 평소 조회수(같은 형식 최근 영상 중앙값), 세로축 영상 조회수 (로그 눈금)"><svg><use href="#i-chart"/></svg>채널 평소 대비 조회수 분포</h2>
             <div class="legend">
+              <span id="legend-shorts" hidden><i class="lg lg-ring"></i>쇼츠</span>
               <span><i class="lg lg-mega"></i>10배+</span>
               <span><i class="lg lg-high"></i>3배+</span>
               <span><i class="lg lg-norm"></i>그 외</span>
               <span><i class="lg lg-dim"></i>필터 제외</span>
             </div>
           </div>
+          <div class="axis-caption axis-y">↑ 세로: 영상 조회수</div>
           <div class="scatter-box" id="scatter-box">
             <canvas id="scatter-canvas"></canvas>
             <div id="scatter-tooltip" class="chart-tooltip" hidden></div>
           </div>
+          <div class="axis-caption axis-x">가로: 채널 평소 조회수 →</div>
           <p class="card-note" id="scatter-note">점선: 채널 평소의 1·3·10배 · 점을 누르면 영상으로 이동</p>
         </article>
 
@@ -174,8 +178,11 @@
         <!-- Feed -->
         <div class="panel panel-feed">
           <div class="panel-head">
-            <h2 class="panel-title"><svg><use href="#i-trend"/></svg>떡상 영상 <span class="count" id="feed-count"></span></h2>
-            <label class="field field-compact">
+            <div class="tabs" id="left-tabs" role="tablist">
+              <button type="button" class="tab active" data-tab="feed" role="tab"><svg><use href="#i-trend"/></svg>영상 목록 <span class="count" id="feed-count"></span></button>
+              <button type="button" class="tab" data-tab="trends" role="tab"><svg><use href="#i-chart"/></svg>트렌드 분석</button>
+            </div>
+            <label class="field field-compact" id="sort-field">
               <span class="field-label">정렬</span>
               <select id="sort-select" class="select">
                 <option value="ratio" selected>평소 대비 배수 순</option>
@@ -187,10 +194,19 @@
             </label>
           </div>
           <div class="filter-bar" id="filter-bar" hidden>
-            <span>키워드 필터</span>
-            <button type="button" class="chip chip-active" id="filter-clear" title="필터 해제"><span id="filter-word"></span><svg><use href="#i-close"/></svg></button>
+            <div class="segmented segmented-sm" id="feed-format" role="group" aria-label="목록 형식" hidden>
+              <button type="button" class="seg-btn active" data-view="all">전체</button>
+              <button type="button" class="seg-btn" data-view="shorts">쇼츠</button>
+              <button type="button" class="seg-btn" data-view="long">롱폼</button>
+            </div>
+            <span class="filter-kw" id="filter-kw" hidden>
+              <span>키워드</span>
+              <button type="button" class="chip chip-active" id="filter-clear" title="필터 해제"><span id="filter-word"></span><svg><use href="#i-close"/></svg></button>
+            </span>
+            <span class="filter-note" id="filter-note"></span>
           </div>
           <div class="feed" id="video-feed" tabindex="-1"></div>
+          <div class="trend-view" id="trend-view" hidden></div>
         </div>
 
         <!-- AI -->
@@ -221,10 +237,11 @@
               <input type="password" id="setting-api-key" class="input" placeholder="AIza로 시작하는 39자리 키" spellcheck="false">
               <button type="button" id="btn-toggle-key" class="btn btn-ghost btn-sm">보기</button>
             </div>
-            <p class="form-hint">Google Cloud 콘솔에서 무료로 발급합니다. 기본 한도는 검색 하루 100회, 영상·채널 조회 하루 10,000 유닛이며 분석 1회에 검색 1회와 조회 약 2~85 유닛을 씁니다(채널 평소 조회수는 24시간 동안 저장해 다시 쓰므로 같은 채널은 추가 비용이 없습니다).
+            <p class="form-hint">Google Cloud 콘솔에서 무료로 발급합니다. 기본 한도는 검색 하루 100회, 영상·채널 조회 하루 10,000 유닛이며 분석 1회에 검색 2~3회(전체 3회 · 롱폼 2회 · 쇼츠 2회)와 조회 약 5~250 유닛을 씁니다. 채널 평소 조회수는 24시간 동안 저장해 다시 쓰므로 같은 채널은 추가 비용이 없습니다.
               <button type="button" class="link-btn" id="btn-open-console">발급 페이지 열기<svg><use href="#i-external"/></svg></button>
             </p>
             <p class="form-hint" id="key-storage-hint"></p>
+            <p class="form-hint" id="usage-hint"></p>
           </section>
 
           <section class="form-section">

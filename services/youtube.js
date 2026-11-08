@@ -56,7 +56,14 @@ function explainApiError(status, body) {
   return new YouTubeApiError(`YouTube API 요청에 실패했습니다 (HTTP ${status}).`, 'API_ERROR', raw);
 }
 
+// 사용량 집계 훅(main 에서 주입). 요청을 보낸 시점에 센다(실패한 요청도 할당량을 쓴다).
+let usageRecorder = null;
+function setUsageRecorder(fn) {
+  usageRecorder = typeof fn === 'function' ? fn : null;
+}
+
 async function apiGet(endpoint, params, apiKey) {
+  if (usageRecorder) usageRecorder(endpoint);
   const qs = new URLSearchParams({ ...params, key: apiKey });
   let res;
   try {
@@ -93,7 +100,7 @@ async function mapLimit(items, limit, fn) {
  * 키워드로 영상을 검색하고 채널 구독자·영상 통계를 합쳐 떡상 지표를 계산한다.
  * search.list 의 제목은 HTML 이스케이프되어 오므로 videos.list 의 원문 snippet 을 사용한다.
  */
-async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', channelCache = null }) {
+async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', format = 'all', channelCache = null }) {
   if (!apiKey) {
     throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
@@ -105,25 +112,35 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
   const publishedAfter = calculatePublishedAfter(publishedPeriod);
   if (publishedAfter) params.publishedAfter = publishedAfter;
 
-  const searchData = await apiGet('search', params, apiKey);
-  const items = (searchData.items || []).filter(it => it.id && it.id.videoId);
-  if (items.length === 0) return { videos: [], excluded: { live: 0 }, baseline: emptyBaselineStats() };
+  // 형식은 검색 단계에서 나눈다. 한 번에 섞어 검색하면 쇼츠가 상위를 차지해 롱폼이 몇 개밖에 남지 않는다.
+  //   short = 4분 미만, medium = 4~20분, long = 20분 초과 (search.list videoDuration)
+  //   쇼츠만 볼 때는 한 버킷뿐이라 다음 페이지까지 받아 표본을 늘린다.
+  const fmt = SEARCH_PLAN[format] ? format : 'all';
+  const pages = await Promise.all(SEARCH_PLAN[fmt].map(videoDuration => apiGet('search', { ...params, videoDuration }, apiKey)));
+  if (fmt === 'shorts' && pages[0] && pages[0].nextPageToken) {
+    pages.push(await apiGet('search', { ...params, videoDuration: 'short', pageToken: pages[0].nextPageToken }, apiKey));
+  }
+  // 버킷별 결과를 번갈아 합쳐 관련도 상위가 고르게 섞이도록 한다
+  const items = [];
+  const seen = new Set();
+  const lists = pages.map(p => (p.items || []).filter(it => it.id && it.id.videoId));
+  for (let i = 0; i < Math.max(0, ...lists.map(l => l.length)); i++) {
+    for (const l of lists) {
+      const it = l[i];
+      if (it && !seen.has(it.id.videoId)) { seen.add(it.id.videoId); items.push(it); }
+    }
+  }
+  const searchCalls = pages.length;
+  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
+  if (items.length === 0) return { videos: [], excluded, baseline: emptyBaselineStats(), format: fmt, searchCalls };
 
   const videoIds = [...new Set(items.map(it => it.id.videoId))];
-  const channelIds = [...new Set(items.map(it => it.snippet.channelId).filter(Boolean))];
-
-  const [videoMap, channelMap] = await Promise.all([
-    fetchVideoDetails(videoIds, apiKey),
-    fetchChannelDetails(channelIds, apiKey)
-  ]);
-  // 채널 평소 조회수 수집은 실패해도 검색 전체를 실패시키지 않는다(구독자 대비로 대신)
-  const { uploadsByChannel, stats: baseline } = await fetchChannelUploads(channelMap, apiKey, channelCache);
-
-  const now = Date.now();
-  const videos = [];
-  let liveExcluded = 0;
+  const videoMap = await fetchVideoDetails(videoIds, apiKey);
   const searchSnippet = Object.fromEntries(items.map(it => [it.id.videoId, it.snippet || {}]));
 
+  // 1차 거르기: 라이브·형식 불일치·해시태그 도배·한국어 아님·키워드 무관.
+  // 채널 조회 전에 걸러 채널·평소 조회수 수집 유닛을 아낀다.
+  const kept = [];
   for (const id of videoIds) {
     const v = videoMap[id];
     if (!v) continue; // 삭제·비공개 전환된 영상
@@ -134,10 +151,26 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
     v.title = v.title || decodeEntities(fb.title);
     v.publishedAt = v.publishedAt || fb.publishedAt;
     if (!v.thumbnails || !Object.keys(v.thumbnails).length) v.thumbnails = fb.thumbnails || {};
-    if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') {
-      liveExcluded++;
-      continue;
-    }
+    if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') { excluded.live++; continue; }
+    // 쇼츠는 최대 3분이므로 길이로만 판정한다(설명란 #shorts 때문에 롱폼을 쇼츠 표본과 비교하지 않도록)
+    v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
+    // 'short' 버킷에는 3~4분 롱폼도 섞여 온다 → 선택한 형식과 다르면 제외
+    if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
+    const reason = relevanceIssue(v, query, relevanceLanguage);
+    if (reason) { excluded[reason]++; continue; }
+    kept.push(id);
+  }
+
+  const channelIds = [...new Set(kept.map(id => videoMap[id].channelId).filter(Boolean))];
+  const channelMap = await fetchChannelDetails(channelIds, apiKey);
+  // 채널 평소 조회수 수집은 실패해도 검색 전체를 실패시키지 않는다(구독자 대비로 대신)
+  const { uploadsByChannel, stats: baseline } = await fetchChannelUploads(channelMap, apiKey, channelCache);
+
+  const now = Date.now();
+  const videos = [];
+
+  for (const id of kept) {
+    const v = videoMap[id];
     const ch = channelMap[v.channelId] || { subscriberCount: null };
 
     const viewCount = v.viewCount;
@@ -147,8 +180,7 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
     const publishedAt = new Date(v.publishedAt);
     const ageDays = Math.max(1, (now - publishedAt.getTime()) / 86400000);
     const viewsPerDay = Number.isFinite(ageDays) ? Math.round(viewCount / ageDays) : 0;
-    // 쇼츠는 최대 3분이므로 길이로만 판정한다(설명란 #shorts 때문에 롱폼을 쇼츠 표본과 비교하지 않도록)
-    const isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
+    const isShorts = v.isShorts;
 
     // 메인 지표: 같은 채널·같은 형식의 최근 영상 중앙값 대비 배수
     // 업로드 통계가 캐시에서 왔으면 '48시간 경과' 판정도 그 수집 시각 기준으로 한다
@@ -178,6 +210,9 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
       subscriberCountFormatted: subscriberCount === null ? '비공개' : formatNumber(subscriberCount),
       likeCount: v.likeCount,
       commentCount: v.commentCount,
+      // 반응도(%): 좋아요·댓글이 비공개면 0으로 오므로 조회수가 있을 때만 계산
+      likeRate: viewCount > 0 && v.likeCount > 0 ? Math.round((v.likeCount / viewCount) * 10000) / 100 : null,
+      commentRate: viewCount > 0 && v.commentCount > 0 ? Math.round((v.commentCount / viewCount) * 100000) / 1000 : null,
       // 메인 점수(채널 평소 대비, 계산 불가 시 구독자 대비로 대신)
       score,
       scoreFormatted: formatMultiplier(score),
@@ -196,7 +231,60 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
     });
   }
 
-  return { videos, excluded: { live: liveExcluded }, baseline };
+  return { videos, excluded, baseline, format: fmt, searchCalls };
+}
+
+// 형식별 search.list 호출 계획(검색 1회 = 검색 할당량 1)
+const SEARCH_PLAN = {
+  all: ['short', 'medium', 'long'],
+  long: ['medium', 'long'],
+  shorts: ['short']
+};
+
+// --- 관련성 거르기 ---
+// YouTube 검색은 제목·설명에 키워드를 해시태그로 도배한 해외 스팸 쇼츠까지 돌려준다.
+// 아래 세 가지를 통과한 영상만 분석에 넣는다.
+
+const HASHTAG_RE = /#[^\s#]+/gu;
+const HANGUL_RE = /[ㄱ-ㆎ가-힣]/gu;
+const hangulCount = s => (String(s || '').match(HANGUL_RE) || []).length;
+
+function stripHashtags(s) {
+  return String(s || '').replace(HASHTAG_RE, ' ');
+}
+
+function compact(s) {
+  return String(s || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/** @returns {null|'spam'|'language'|'offtopic'} */
+function relevanceIssue(v, query, relevanceLanguage = 'ko') {
+  // 분해형(NFD) 한글도 같은 글자로 보도록 먼저 정규화
+  const title = String(v.title || '').normalize('NFC');
+  v = { ...v, channelTitle: String(v.channelTitle || '').normalize('NFC'), description: String(v.description || '').normalize('NFC') };
+  query = String(query || '').normalize('NFC');
+  // #shorts·#쇼츠 같은 형식 표시 해시태그는 도배로 세지 않는다
+  const tagsInTitle = (title.match(HASHTAG_RE) || []).filter(t => !/^#(shorts?|쇼츠|숏츠)$/i.test(t));
+  const core = stripHashtags(title);
+  const coreLetters = (core.match(/[\p{L}\p{N}]/gu) || []).length;
+  // 1) 해시태그 도배: 제목에 해시태그 5개 이상, 또는 해시태그를 빼면 글자가 거의 없는 제목
+  if (tagsInTitle.length >= 5 || (tagsInTitle.length >= 2 && coreLetters < 3)) return 'spam';
+
+  // 2) 언어: 한국어 키워드로 찾았는데 제목(해시태그 제외)·채널명에 한글이 없고
+  //    설명 앞부분에도 한글 문장이 없으면 해외 영상(설명에 키워드만 끼워 넣은 경우 포함)
+  if (relevanceLanguage === 'ko' && hangulCount(query) > 0) {
+    const head = hangulCount(core + ' ' + (v.channelTitle || ''));
+    const desc = hangulCount(stripHashtags(String(v.description || '').slice(0, 400)));
+    if (head < 2 && desc < 10) return 'language';
+  }
+
+  // 3) 키워드: 제목·태그·설명 어디에도 키워드(띄어쓰기 무시)나 키워드의 모든 단어가 없으면 무관한 영상
+  const hay = compact(title + ' ' + (v.tags || []).join(' ') + ' ' + v.description);
+  const q = compact(query);
+  if (q && hay.includes(q)) return null;
+  const words = String(query).split(/\s+/).map(compact).filter(w => w.length > 0);
+  if (words.length > 1 && words.every(w => hay.includes(w))) return null;
+  return q ? 'offtopic' : null;
 }
 
 function round1(x) {
@@ -489,6 +577,9 @@ function tokenize(text) {
 
 function extractTitleKeywords(videos, query = '') {
   const queryTokens = new Set(tokenize(query));
+  // 검색어를 품은 합성어(예: 검색어 "일상생활" → "일상생활영어")도 새로운 정보가 아니므로 뺀다
+  // 영문 짧은 토큰(ai 등)은 daily·email 같은 무관한 단어까지 지우므로 한글 토큰에만 적용한다
+  const queryWords = [...queryTokens].filter(q => q.length >= 2 && /[가-힣]/.test(q));
   const freq = new Map();
 
   for (const v of videos) {
@@ -497,7 +588,8 @@ function extractTitleKeywords(videos, query = '') {
         w.length >= 2 &&
         !/^\d+$/.test(w) &&
         !STOP_WORDS.has(w) &&
-        !queryTokens.has(w)
+        !queryTokens.has(w) &&
+        !queryWords.some(q => w.includes(q))
       )
     );
     unique.forEach(w => freq.set(w, (freq.get(w) || 0) + 1));
@@ -585,8 +677,9 @@ function formatRelativeTime(date, now = Date.now()) {
 
 module.exports = {
   searchYouTube,
+  setUsageRecorder,
   computeMarketAnalytics,
   extractTitleKeywords,
   // 테스트용
-  _internal: { parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
+  _internal: { relevanceIssue, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
 };
