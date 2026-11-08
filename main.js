@@ -2,7 +2,7 @@
 // BOKS YOUTUBE FINDER - Electron Main Process
 // ==========================================================================
 
-const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { paths, applyElectronPaths } = require('./services/paths');
@@ -22,6 +22,7 @@ youtubeService.setUsageRecorder(endpoint => usage.record(endpoint));
 
 const FORMATS = ['all', 'long', 'shorts'];
 const safeFormat = f => (FORMATS.includes(f) ? f : 'all');
+const safeOrder = o => (o === 'relevance' ? 'relevance' : 'viewCount');
 
 const isMac = process.platform === 'darwin';
 const ICON_PATH = path.join(__dirname, 'assets', isMac ? 'icon.png' : (process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
@@ -133,7 +134,7 @@ ipcMain.handle('config:save', wrap((cfg) => {
 
 ipcMain.handle('cli:detect-path', wrap(({ engine }) => aiCliService.detectCliPath(engine === 'codex' ? 'codex' : 'claude')));
 
-ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, format }) => {
+ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, format, order }) => {
   const q = String(query || '').trim().slice(0, 100);
   if (!q) throw Object.assign(new Error('검색할 키워드를 입력해 주세요.'), { code: 'EMPTY_QUERY' });
   const config = configService.loadConfig();
@@ -147,11 +148,12 @@ ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, published
       videoCategoryId: String(videoCategoryId || '0'),
       publishedPeriod: String(publishedPeriod || 'all'),
       format: safeFormat(format),
+      order: safeOrder(order),
       channelCache
     });
     const analytics = youtubeService.computeMarketAnalytics(result.videos, q);
     const trends = computeTrends(result.videos, result.format);
-    return { videos: result.videos, excluded: result.excluded, baseline: result.baseline, format: result.format, analytics, trends, usage: usage.snapshot() };
+    return { videos: result.videos, excluded: result.excluded, searchInfo: result.searchInfo, baseline: result.baseline, format: result.format, analytics, trends, usage: usage.snapshot() };
   } finally {
     usage.flush();
   }
@@ -173,29 +175,12 @@ ipcMain.handle('ai:generate-strategy', wrap(({ keyword, videos, format }) => {
 
 ipcMain.handle('ai:cancel', wrap(() => aiCliService.cancel()));
 
-ipcMain.handle('csv:save', wrap(async ({ defaultName, content }) => {
-  const safeName = String(defaultName || 'boks_youtube.csv').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').slice(0, 120);
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'CSV로 저장',
-    defaultPath: path.join(app.getPath('downloads'), safeName),
-    filters: [{ name: 'CSV (Excel 호환)', extensions: ['csv'] }]
-  });
-  if (canceled || !filePath) return { saved: false };
-  await fs.promises.writeFile(filePath, String(content || ''), 'utf8');
-  return { saved: true, filePath };
-}));
-
 ipcMain.handle('shell:open-external', wrap(({ url }) => {
   if (typeof url === 'string' && /^https:\/\/(www\.)?(youtube\.com|youtu\.be|console\.cloud\.google\.com|developers\.google\.com)\//i.test(url)) {
     shell.openExternal(url);
     return true;
   }
   throw Object.assign(new Error('허용되지 않은 주소입니다.'), { code: 'URL_BLOCKED' });
-}));
-
-ipcMain.handle('shell:show-item', wrap(({ filePath }) => {
-  if (typeof filePath === 'string' && fs.existsSync(filePath)) shell.showItemInFolder(filePath);
-  return true;
 }));
 
 // --- 창 제어 (커스텀 타이틀바) ---

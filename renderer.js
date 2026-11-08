@@ -24,22 +24,30 @@ const state = {
 };
 
 // 상단 검색 조건 기억(키워드 제외). 브라우저 저장소는 app-data/electron 안에 있다.
-const PREFS_KEY = 'boks.prefs.v1';
-const PREF_DEFAULTS = { format: 'all', period: 'all', category: '0', minRatio: '3', sort: 'ratio' };
+// v2: 목록 배수 필터 기본값을 '전체'로 바꾸고(목록 = 분석 대상) 검색 기준(조회수순/관련도순)을 추가했다.
+const PREFS_KEY = 'boks.prefs.v2';
+const LEGACY_PREFS_KEY = 'boks.prefs.v1';
+const PREF_DEFAULTS = { format: 'all', period: 'all', category: '0', order: 'viewCount', minRatio: '0', sort: 'ratio' };
 
 function loadPrefs() {
+  const read = key => {
+    const raw = JSON.parse(localStorage.getItem(key) || 'null');
+    return raw && typeof raw === 'object' ? raw : null;
+  };
   try {
-    const raw = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
-    return { ...PREF_DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
-  } catch {
-    return { ...PREF_DEFAULTS };
-  }
+    const cur = read(PREFS_KEY);
+    if (cur) return { ...PREF_DEFAULTS, ...cur };
+    // 이전 버전 조건은 이어 쓰되, 예전 기본값이던 '3배 이상' 목록 필터는 가져오지 않는다
+    const old = read(LEGACY_PREFS_KEY);
+    if (old) { const { minRatio, ...rest } = old; return { ...PREF_DEFAULTS, ...rest }; }
+  } catch { /* 손상 → 기본값 */ }
+  return { ...PREF_DEFAULTS };
 }
 
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      format: selectedFormat(), period: selectedPeriod(),
+      format: selectedFormat(), period: selectedPeriod(), order: selectedOrder(),
       category: el.categoryFilter.value, minRatio: el.outlierFilter.value, sort: el.sortSelect.value
     }));
   } catch { /* 저장소를 쓸 수 없으면 이번 실행에서만 유지 */ }
@@ -59,6 +67,7 @@ function setSelect(select, value) {
 function applyPrefs(p) {
   setSegment(el.formatToggle, 'format', p.format);
   setSegment(el.periodToggle, 'period', p.period);
+  setSegment(el.orderToggle, 'order', p.order);
   setSelect(el.categoryFilter, String(p.category));
   setSelect(el.outlierFilter, String(p.minRatio));
   setSelect(el.sortSelect, String(p.sort));
@@ -66,6 +75,7 @@ function applyPrefs(p) {
 
 const selectedFormat = () => el.formatToggle.querySelector('.seg-btn.active')?.dataset.format || 'all';
 const selectedPeriod = () => el.periodToggle.querySelector('.seg-btn.active')?.dataset.period || 'all';
+const selectedOrder = () => el.orderToggle.querySelector('.seg-btn.active')?.dataset.order || 'viewCount';
 
 const OUTLIER = 3;
 const MEGA = 10;
@@ -74,11 +84,11 @@ const EXAMPLES = ['AI 부업', '쇼츠 자동화', '재테크 초보', '자취 �
 
 const el = {
   searchForm: $('search-form'), searchInput: $('search-input'), searchBtn: $('search-btn'),
-  formatToggle: $('format-toggle'), outlierFilter: $('outlier-filter'), categoryFilter: $('category-filter'),
+  formatToggle: $('format-toggle'), orderToggle: $('order-toggle'), outlierFilter: $('outlier-filter'), categoryFilter: $('category-filter'),
   periodToggle: $('period-toggle'), sortSelect: $('sort-select'), sortField: $('sort-field'),
   leftTabs: $('left-tabs'), trendView: $('trend-view'), feedFormat: $('feed-format'), filterKw: $('filter-kw'), filterNote: $('filter-note'),
   usageMeter: $('usage-meter'), usageHint: $('usage-hint'), legendShorts: $('legend-shorts'),
-  btnCsv: $('btn-export-csv'), btnSettings: $('btn-open-settings'), settingsAlert: $('settings-alert'),
+  btnSettings: $('btn-open-settings'), settingsAlert: $('settings-alert'),
   insights: $('insights'), gaugeLevel: $('gauge-level'), gaugeScore: $('gauge-score'), gaugeFill: $('gauge-fill'),
   metricSmallShare: $('metric-small-share'), metricSmallOutliers: $('metric-small-outliers'), gaugeAdvice: $('gauge-advice'),
   scatterBox: $('scatter-box'), scatterCanvas: $('scatter-canvas'), scatterTooltip: $('scatter-tooltip'), scatterNote: $('scatter-note'),
@@ -225,6 +235,7 @@ function setupEvents() {
   // 형식·기간·주제는 검색 조건 → 바뀌면 다시 검색
   segHandler(el.formatToggle, 'format', '형식');
   segHandler(el.periodToggle, 'period', '기간');
+  segHandler(el.orderToggle, 'order', '검색 기준');
   el.categoryFilter.addEventListener('change', () => rerun('주제'));
   // 배수·정렬은 화면 필터 → 다시 그리기만
   el.outlierFilter.addEventListener('change', () => { savePrefs(); onClientFilterChange(); });
@@ -243,7 +254,6 @@ function setupEvents() {
   // 파일을 창에 떨어뜨려도 페이지가 바뀌지 않도록 차단
   ['dragover', 'drop'].forEach(type => document.addEventListener(type, e => e.preventDefault()));
 
-  el.btnCsv.addEventListener('click', handleExportCsv);
   el.btnSettings.addEventListener('click', openSettings);
   el.btnAiRun.addEventListener('click', runAi);
   el.btnAiStop.addEventListener('click', () => stopAi());
@@ -329,7 +339,8 @@ async function handleSearch(forcedQuery) {
     query,
     videoCategoryId: el.categoryFilter.value,
     publishedPeriod: selectedPeriod(),
-    format: selectedFormat()
+    format: selectedFormat(),
+    order: selectedOrder()
   });
   if (seq !== state.searchSeq) return;
   setSearching(false);
@@ -356,11 +367,11 @@ async function handleSearch(forcedQuery) {
   state.trends = res.data.trends;
   state.format = res.data.format || 'all';
   state.excluded = res.data.excluded || { live: 0 };
+  state.searchInfo = res.data.searchInfo || null;
   state.keywordFilter = '';
   state.aiReport = null;
   state.feedView = setSegment(el.feedFormat, 'view', 'all');
   state.openTags.clear();
-  el.btnCsv.disabled = state.videos.length === 0;
 
   if (state.videos.length === 0) {
     el.insights.hidden = true;
@@ -392,7 +403,6 @@ function resetResults() {
   state.openTags.clear();
   el.insights.hidden = true;
   renderTrends();
-  el.btnCsv.disabled = true;
   el.btnAiRun.disabled = true;
 }
 
@@ -517,13 +527,34 @@ function excludedNote() {
   if (x.live) parts.push(`라이브·예정 ${x.live}`);
   if (x.format) parts.push(`다른 형식 ${x.format}`);
   const total = (x.spam || 0) + (x.language || 0) + (x.offtopic || 0) + (x.live || 0) + (x.format || 0);
-  return total ? { text: `검색 결과 중 ${total}개 제외`, title: `분석에서 뺀 영상: ${parts.join(' · ')}개\n해시태그만 나열한 스팸, 한국어 키워드인데 한글이 거의 없는 해외 영상, 제목·태그·설명 어디에도 키워드가 없는 영상을 걸러냅니다.` } : null;
+  return { total, parts };
+}
+
+// 목록 상단 기준 안내: 분석 대상(= 목록 전체 = 지표·트렌드·AI 기준)과 분석에서 뺀 영상 수
+function scopeNote(shown) {
+  const n = state.videos.length;
+  const outliers = state.analytics ? state.analytics.outlierCount : 0;
+  const ex = excludedNote();
+  const lines = [
+    `분석 대상 ${n}개: 목록 전체이며 시장 지표·트렌드 분석·AI 기획안이 모두 이 ${n}개만 기준으로 계산됩니다.`,
+    `떡상 ${outliers}개: 조회수 ${minViewsLabel()} 이상이면서 채널 평소의 3배 이상인 영상입니다.`
+  ];
+  if (ex.total) {
+    lines.push(`제외 ${ex.total}개(${ex.parts.join(' · ')}개)는 목록·지표·트렌드·AI 어디에도 넣지 않습니다.`,
+      '해시태그만 나열한 스팸, 한국어 키워드인데 한글이 거의 없는 해외 영상, 제목·태그·설명·채널명 어디에도 키워드가 없는 영상을 걸러냅니다.');
+  }
+  const si = state.searchInfo;
+  if (si) lines.push(`검색 기준: ${si.order === 'relevance' ? '관련도순' : '조회수순'} · 검색 ${si.calls}회 사용${si.topupStopped ? ' · 사용 한도 때문에 보충 검색을 일부 못 했습니다' : ''}`);
+  if (shown !== n) lines.push(`지금 목록은 필터로 ${shown}개만 보여 주고 있습니다. 지표는 분석 대상 ${n}개 기준입니다.`);
+  return {
+    text: `분석 대상 ${n}개 · 떡상 ${outliers}개${ex.total ? ` · 제외 ${ex.total}개` : ''}`,
+    title: lines.join('\n')
+  };
 }
 
 function renderFeed() {
   const hasVideos = state.videos.length > 0;
   const showFormat = hasVideos && state.format === 'all';
-  const note = hasVideos ? excludedNote() : null;
   el.feedFormat.hidden = !showFormat;
   if (showFormat) {
     const n = { all: state.videos.length, shorts: state.videos.filter(v => v.isShorts).length };
@@ -534,28 +565,31 @@ function renderFeed() {
   }
   el.filterKw.hidden = !state.keywordFilter;
   el.filterWord.textContent = state.keywordFilter ? `#${state.keywordFilter}` : '';
-  el.filterNote.textContent = note ? note.text : '';
-  el.filterNote.title = note ? note.title : '';
-  el.filterBar.hidden = !(showFormat || state.keywordFilter || note);
+  el.filterBar.hidden = !hasVideos;
 
   if (!hasVideos) {
     el.feedCount.textContent = '';
+    el.filterNote.textContent = '';
     el.feed.innerHTML = state.keyword ? noResultHtml() : onboardingHtml();
     return;
   }
 
   const f = currentFilters();
   const list = sortVideos(state.videos.filter(v => passesFilters(v, f)));
-  el.feedCount.textContent = list.length === state.videos.length
-    ? `${list.length}개`
-    : `${list.length}개 표시 · 전체 ${state.videos.length}개`;
+  const filtered = list.length !== state.videos.length;
+  const note = scopeNote(list.length);
+  el.filterNote.textContent = note.text;
+  el.filterNote.title = note.title;
+  el.outlierFilter.classList.toggle('is-on', f.minRatio > 0);
+  el.feedCount.textContent = filtered ? `${list.length}/${state.videos.length}` : `${list.length}`;
+  el.feedCount.title = filtered ? `필터로 ${list.length}개만 표시 중 · 분석 대상 ${state.videos.length}개` : `분석 대상 ${list.length}개`;
 
   if (list.length === 0) {
     el.feed.innerHTML = `
       <div class="state">
         <div class="state-icon">${icon('search')}</div>
         <h3>조건에 맞는 영상이 없습니다</h3>
-        <p>떡상 배수 기준을 낮추거나 형식·키워드 필터를 해제해 보세요.</p>
+        <p>배수 필터를 '전체'로 바꾸거나 형식·키워드 필터를 해제해 보세요.</p>
         <div class="actions">
           ${f.minRatio > 0 ? '<button type="button" class="btn btn-ghost btn-sm" data-act="ratio-all">배수 전체 보기</button>' : ''}
           ${f.keyword ? '<button type="button" class="btn btn-ghost btn-sm" data-act="clear-keyword">키워드 필터 해제</button>' : ''}
@@ -1011,7 +1045,7 @@ function renderTrends() {
   const fmtLabel = { all: '쇼츠·롱폼', long: '롱폼', shorts: '쇼츠' }[t.format];
 
   const kpis = [
-    ['분석 영상', `${tt.count}개`, `${fmtLabel} · 관련 없는 영상 제외 후`],
+    ['분석 영상', `${tt.count}개`, excludedNote().total ? `제외 ${excludedNote().total}개는 미포함` : fmtLabel],
     ['떡상 비율', `${tt.outlierRate}%`, `${tt.outlierCount}개가 평소의 3배 이상`],
     ['조회수 중앙값', fmtCount(tt.medianViews), '절반이 이 조회수 이상'],
     ['평소 대비 중앙값', fmtX(tt.medianScore), '1배 = 채널 평소 수준'],
@@ -1053,7 +1087,7 @@ function renderTrends() {
   const tierCard = card('채널 규모별 분포', '구독자 수 기준', `
     <div class="donut-wrap">
       ${donutSvg(tiers.map(x => ({ label: x.label, value: x.count, color: TIER_COLORS[x.key] })), tt.count)}
-      <table class="ttable compact"><thead><tr><th>구독자</th><th>영상</th><th>떡상률</th><th>평소 대비</th></tr></thead><tbody>
+      <table class="ttable compact tiers"><thead><tr><th>구독자</th><th>영상</th><th>떡상률</th><th>평소 대비</th></tr></thead><tbody>
         ${tiers.map(x => `<tr><th><i class="dot" data-c="${TIER_COLORS[x.key]}"></i>${esc(x.label)}</th><td>${x.count} (${x.share}%)</td><td>${x.count ? `${x.outlierRate}%` : '-'}</td><td>${fmtX(x.medianScore)}</td></tr>`).join('')}
       </tbody></table>
     </div>`);
@@ -1086,8 +1120,8 @@ function renderTrends() {
     : '<p class="tempty">두 개 이상 영상에서 겹친 태그가 없습니다.</p>');
 
   const chCard = card('조회수 상위 채널', `채널 ${t.channelCount}개 중`, `
-    <table class="ttable compact"><thead><tr><th>채널</th><th>영상</th><th>조회수 합</th><th>최고 배수</th></tr></thead><tbody>
-      ${t.topChannels.map(c => `<tr><th class="ellipsis" title="${esc(c.channelTitle)}">${esc(c.channelTitle)}<small>구독자 ${c.subscriberCount === null || c.subscriberCount === undefined ? '비공개' : fmtCount(c.subscriberCount)}</small></th><td>${c.count}개${c.outlierCount ? ` · 떡상 ${c.outlierCount}` : ''}</td><td>${fmtCount(c.totalViews)} (${c.viewsShare}%)</td><td>${fmtX(c.bestScore)}</td></tr>`).join('')}
+    <table class="ttable compact channels"><thead><tr><th>채널</th><th>영상</th><th>조회수 합</th><th>최고 배수</th></tr></thead><tbody>
+      ${t.topChannels.map(c => `<tr><th class="ellipsis" title="${esc(c.channelTitle)}">${esc(c.channelTitle)}<small>구독자 ${c.subscriberCount === null || c.subscriberCount === undefined ? '비공개' : fmtCount(c.subscriberCount)}</small></th><td>${c.count}개${c.outlierCount ? `<small>떡상 ${c.outlierCount}</small>` : ''}</td><td>${fmtCount(c.totalViews)}<small>${c.viewsShare}%</small></td><td>${fmtX(c.bestScore)}</td></tr>`).join('')}
     </tbody></table>`);
 
   el.trendView.innerHTML = `
@@ -1096,13 +1130,13 @@ function renderTrends() {
     <div class="tgrid">
       ${formatCard}
       ${tierCard}
-      ${durCard}
+      ${chCard}
       ${dayCard}
       ${hourCard}
+      ${durCard}
       ${recencyCard}
       ${titleCard}
       ${tagCard}
-      ${chCard}
     </div>`;
   applyBarWidths(el.trendView);
 }
@@ -1415,44 +1449,6 @@ async function saveSettings() {
   toast('설정을 저장했습니다.', 'success');
   if (state.videos.length === 0 && !state.keyword) renderFeed();
   if (!state.aiRunning && !state.aiReport && state.videos.length === 0) renderAiIdle();
-}
-
-// ---------------------------------------------------------------------------
-// CSV
-// ---------------------------------------------------------------------------
-
-function csvCell(value) {
-  let s = String(value ?? '');
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; // Excel 수식 주입 방지
-  return `"${s.replace(/"/g, '""')}"`;
-}
-
-function buildCsv(videos) {
-  const headers = ['영상 ID', '제목', '카테고리', '채널명', '구독자 수', '조회수', '채널 평소 조회수', '평소 대비 배수', '구독자 대비 배수', '배수 기준', '떡상 여부', '하루 평균 조회수', '좋아요 수', '좋아요율(%)', '댓글 수', '형식', '재생 시간(초)', '업로드 일시', '태그', 'URL'];
-  const basisLabel = { baseline: '채널 평소', subs: '구독자 대비(추정)' };
-  const rows = videos.map(v => [
-    v.id, v.title, v.categoryName, v.channelTitle,
-    v.subscriberCount ?? '비공개', v.viewCount, v.channelBaseline ?? '',
-    v.scoreBasis === 'baseline' ? v.score : '', v.subsRatio ?? '', basisLabel[v.scoreBasis] || '',
-    v.qualifies && v.score >= OUTLIER ? '떡상' : '', v.viewsPerDay,
-    v.likeCount || '', v.likeRate ?? '', v.commentCount || '',
-    v.isShorts ? '쇼츠' : '롱폼', v.durationSec, v.publishedAt, (v.tags || []).join('; '), v.url
-  ].map(csvCell).join(','));
-  return '﻿' + [headers.map(csvCell).join(','), ...rows].join('\r\n');
-}
-
-async function handleExportCsv() {
-  if (state.videos.length === 0) return;
-  const list = sortVideos([...state.videos]);
-  const date = new Date().toISOString().slice(0, 10);
-  const res = await window.api.saveCsv(`boks_youtube_${state.keyword}_${date}.csv`, buildCsv(list));
-  if (!res.ok) return toast(res.error.message, 'error');
-  if (res.data.saved) {
-    toast(`${list.length}개 영상을 CSV로 저장했습니다.`, 'success', {
-      label: '폴더 열기',
-      onClick: () => window.api.showItemInFolder(res.data.filePath)
-    });
-  }
 }
 
 window.addEventListener('DOMContentLoaded', init);

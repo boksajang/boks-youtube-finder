@@ -100,7 +100,7 @@ async function mapLimit(items, limit, fn) {
  * 키워드로 영상을 검색하고 채널 구독자·영상 통계를 합쳐 떡상 지표를 계산한다.
  * search.list 의 제목은 HTML 이스케이프되어 오므로 videos.list 의 원문 snippet 을 사용한다.
  */
-async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', format = 'all', channelCache = null }) {
+async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', format = 'all', order = 'viewCount', channelCache = null }) {
   if (!apiKey) {
     throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
@@ -114,52 +114,103 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
 
   // 형식은 검색 단계에서 나눈다. 한 번에 섞어 검색하면 쇼츠가 상위를 차지해 롱폼이 몇 개밖에 남지 않는다.
   //   short = 4분 미만, medium = 4~20분, long = 20분 초과 (search.list videoDuration)
-  //   쇼츠만 볼 때는 한 버킷뿐이라 다음 페이지까지 받아 표본을 늘린다.
   const fmt = SEARCH_PLAN[format] ? format : 'all';
-  const pages = await Promise.all(SEARCH_PLAN[fmt].map(videoDuration => apiGet('search', { ...params, videoDuration }, apiKey)));
-  if (fmt === 'shorts' && pages[0] && pages[0].nextPageToken) {
-    pages.push(await apiGet('search', { ...params, videoDuration: 'short', pageToken: pages[0].nextPageToken }, apiKey));
-  }
-  // 버킷별 결과를 번갈아 합쳐 관련도 상위가 고르게 섞이도록 한다
-  const items = [];
+  const primary = order === 'relevance' ? 'relevance' : 'viewCount';
+  const target = TOPUP_TARGET[fmt];
+  // 버킷별 검색 단계. 첫 단계는 모두 실행하고, 이후 단계는 그 버킷의 분석 대상이 target 미만일 때만 실행한다.
+  //   조회수순: regionCode·relevanceLanguage 는 힌트일 뿐이라 해외 인기 영상이 상위를 차지할 수 있다
+  //            → 한국어 영상이 부족하면 관련도순(한국어 가중) 1페이지로 보충
+  //   관련도순: 부족하면 다음 페이지
+  const stepsFor = () => primary === 'viewCount'
+    ? [{ order: 'viewCount' }, ...(fmt === 'shorts' ? [{ order: 'viewCount', next: true }] : []), { order: 'relevance' }]
+    : [{ order: 'relevance' }, { order: 'relevance', next: true }];
+  const buckets = SEARCH_PLAN[fmt].map(videoDuration => ({ videoDuration, steps: stepsFor(), tokens: {}, kept: 0 }));
+
+  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
+  const excludedItems = [];
+  const kept = [];
+  const videoMap = {};
   const seen = new Set();
-  const lists = pages.map(p => (p.items || []).filter(it => it.id && it.id.videoId));
-  for (let i = 0; i < Math.max(0, ...lists.map(l => l.length)); i++) {
-    for (const l of lists) {
-      const it = l[i];
-      if (it && !seen.has(it.id.videoId)) { seen.add(it.id.videoId); items.push(it); }
+  let searchCalls = 0;
+  let topupStopped = false;
+
+  async function runStep(b) {
+    const step = b.steps.shift();
+    const p = { ...params, videoDuration: b.videoDuration };
+    if (step.order === 'viewCount') p.order = 'viewCount';
+    if (step.next) {
+      const token = b.tokens[step.order];
+      if (!token) return [];
+      p.pageToken = token;
+    }
+    searchCalls++;
+    const page = await apiGet('search', p, apiKey);
+    b.tokens[step.order] = page.nextPageToken || null;
+    return (page.items || []).filter(it => it.id && it.id.videoId);
+  }
+
+  for (let round = 0; ; round++) {
+    const active = buckets.filter(b => b.steps.length > 0 && (round === 0 || b.kept < target));
+    if (active.length === 0) break;
+    let lists;
+    try {
+      lists = await Promise.all(active.map(runStep));
+    } catch (err) {
+      if (round === 0) throw err;
+      topupStopped = true; // 보충 검색 실패(할당량 등)는 이미 모은 결과로 계속한다
+      break;
+    }
+    // 버킷별 결과를 번갈아 합쳐 각 버킷 상위가 고르게 섞이도록 한다
+    const fresh = [];
+    for (let i = 0; i < Math.max(0, ...lists.map(l => l.length)); i++) {
+      lists.forEach((l, k) => {
+        const it = l[i];
+        if (it && !seen.has(it.id.videoId)) { seen.add(it.id.videoId); fresh.push({ it, bucket: active[k] }); }
+      });
+    }
+    if (fresh.length === 0) continue;
+
+    let details;
+    try {
+      details = await fetchVideoDetails(fresh.map(x => x.it.id.videoId), apiKey);
+    } catch (err) {
+      if (round === 0) throw err;
+      topupStopped = true;
+      break;
+    }
+
+    // 1차 거르기: 라이브·형식 불일치·해시태그 도배·한국어 아님·키워드 무관.
+    // 채널 조회 전에 걸러 채널·평소 조회수 수집 유닛을 아낀다.
+    for (const { it, bucket } of fresh) {
+      const id = it.id.videoId;
+      const v = details[id];
+      if (!v) continue; // 삭제·비공개 전환된 영상
+      // videos.list 값이 비어 있으면 search.list 값으로 보완(제목은 이스케이프 해제)
+      const fb = it.snippet || {};
+      v.channelId = v.channelId || fb.channelId || '';
+      v.channelTitle = v.channelTitle || decodeEntities(fb.channelTitle);
+      v.title = v.title || decodeEntities(fb.title);
+      v.publishedAt = v.publishedAt || fb.publishedAt;
+      if (!v.thumbnails || !Object.keys(v.thumbnails).length) v.thumbnails = fb.thumbnails || {};
+      if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') { excluded.live++; continue; }
+      // 쇼츠는 최대 3분이므로 길이로만 판정한다(설명란 #shorts 때문에 롱폼을 쇼츠 표본과 비교하지 않도록)
+      v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
+      // 'short' 버킷에는 3~4분 롱폼도 섞여 온다 → 선택한 형식과 다르면 제외
+      if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
+      const reason = relevanceIssue(v, query, relevanceLanguage);
+      if (reason) {
+        excluded[reason]++;
+        excludedItems.push({ id, reason, title: v.title, channelTitle: v.channelTitle, viewCount: v.viewCount });
+        continue;
+      }
+      videoMap[id] = v;
+      kept.push(id);
+      bucket.kept++;
     }
   }
-  const searchCalls = pages.length;
-  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
-  if (items.length === 0) return { videos: [], excluded, baseline: emptyBaselineStats(), format: fmt, searchCalls };
 
-  const videoIds = [...new Set(items.map(it => it.id.videoId))];
-  const videoMap = await fetchVideoDetails(videoIds, apiKey);
-  const searchSnippet = Object.fromEntries(items.map(it => [it.id.videoId, it.snippet || {}]));
-
-  // 1차 거르기: 라이브·형식 불일치·해시태그 도배·한국어 아님·키워드 무관.
-  // 채널 조회 전에 걸러 채널·평소 조회수 수집 유닛을 아낀다.
-  const kept = [];
-  for (const id of videoIds) {
-    const v = videoMap[id];
-    if (!v) continue; // 삭제·비공개 전환된 영상
-    // videos.list 값이 비어 있으면 search.list 값으로 보완(제목은 이스케이프 해제)
-    const fb = searchSnippet[id] || {};
-    v.channelId = v.channelId || fb.channelId || '';
-    v.channelTitle = v.channelTitle || decodeEntities(fb.channelTitle);
-    v.title = v.title || decodeEntities(fb.title);
-    v.publishedAt = v.publishedAt || fb.publishedAt;
-    if (!v.thumbnails || !Object.keys(v.thumbnails).length) v.thumbnails = fb.thumbnails || {};
-    if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') { excluded.live++; continue; }
-    // 쇼츠는 최대 3분이므로 길이로만 판정한다(설명란 #shorts 때문에 롱폼을 쇼츠 표본과 비교하지 않도록)
-    v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
-    // 'short' 버킷에는 3~4분 롱폼도 섞여 온다 → 선택한 형식과 다르면 제외
-    if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
-    const reason = relevanceIssue(v, query, relevanceLanguage);
-    if (reason) { excluded[reason]++; continue; }
-    kept.push(id);
-  }
+  const searchInfo = { calls: searchCalls, order: primary, topupStopped };
+  if (kept.length === 0) return { videos: [], excluded, excludedItems, baseline: emptyBaselineStats(), format: fmt, searchCalls, searchInfo };
 
   const channelIds = [...new Set(kept.map(id => videoMap[id].channelId).filter(Boolean))];
   const channelMap = await fetchChannelDetails(channelIds, apiKey);
@@ -231,10 +282,13 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
     });
   }
 
-  return { videos, excluded, baseline, format: fmt, searchCalls };
+  return { videos, excluded, excludedItems, baseline, format: fmt, searchCalls, searchInfo };
 }
 
-// 형식별 search.list 호출 계획(검색 1회 = 검색 할당량 1)
+// 보충 검색 기준: 버킷별 분석 대상이 이 수보다 적으면 다음 단계 검색을 더 한다
+const TOPUP_TARGET = { all: 20, long: 25, shorts: 40 };
+
+// 형식별 search.list 버킷(검색 1회 = 검색 할당량 1)
 const SEARCH_PLAN = {
   all: ['short', 'medium', 'long'],
   long: ['medium', 'long'],
@@ -261,30 +315,44 @@ function compact(s) {
 function relevanceIssue(v, query, relevanceLanguage = 'ko') {
   // 분해형(NFD) 한글도 같은 글자로 보도록 먼저 정규화
   const title = String(v.title || '').normalize('NFC');
-  v = { ...v, channelTitle: String(v.channelTitle || '').normalize('NFC'), description: String(v.description || '').normalize('NFC') };
+  const channelTitle = String(v.channelTitle || '').normalize('NFC');
+  const description = String(v.description || '').normalize('NFC');
   query = String(query || '').normalize('NFC');
+  const q = compact(query);
+  const words = query.split(/\s+/).map(compact).filter(w => w.length > 0);
+  const koQuery = relevanceLanguage === 'ko' && hangulCount(query) > 0;
+  const titleC = compact(title); // 해시태그 글자 포함
+  const titleHasQuery = q && (titleC.includes(q) || words.some(w => w.length >= 2 && titleC.includes(w)));
+
   // #shorts·#쇼츠 같은 형식 표시 해시태그는 도배로 세지 않는다
   const tagsInTitle = (title.match(HASHTAG_RE) || []).filter(t => !/^#(shorts?|쇼츠|숏츠)$/i.test(t));
   const core = stripHashtags(title);
   const coreLetters = (core.match(/[\p{L}\p{N}]/gu) || []).length;
-  // 1) 해시태그 도배: 제목에 해시태그 5개 이상, 또는 해시태그를 빼면 글자가 거의 없는 제목
-  if (tagsInTitle.length >= 5 || (tagsInTitle.length >= 2 && coreLetters < 3)) return 'spam';
+  const head = hangulCount(core + ' ' + channelTitle);
+  // 1) 해시태그 도배: 제목에 해시태그 5개 이상, 또는 해시태그를 빼면 글자가 거의 없는 제목.
+  //    단 한국어 검색에서 한글 본문 제목 뒤에 키워드 해시태그를 붙인 영상(예: "초간단 크림당면 #자취요리 #먹방 …")은
+  //    한국 쇼츠의 흔한 제목 형식이므로 정상 영상으로 본다. 해시태그만 있는 제목은 그대로 도배로 본다.
+  if (coreLetters < 3 && tagsInTitle.length >= 2) return 'spam';
+  if (tagsInTitle.length >= 5 && !(koQuery && hangulCount(core) >= 2 && titleHasQuery)) return 'spam';
 
   // 2) 언어: 한국어 키워드로 찾았는데 제목(해시태그 제외)·채널명에 한글이 없고
   //    설명 앞부분에도 한글 문장이 없으면 해외 영상(설명에 키워드만 끼워 넣은 경우 포함)
-  if (relevanceLanguage === 'ko' && hangulCount(query) > 0) {
-    const head = hangulCount(core + ' ' + (v.channelTitle || ''));
-    const desc = hangulCount(stripHashtags(String(v.description || '').slice(0, 400)));
+  if (koQuery) {
+    const desc = hangulCount(stripHashtags(description.slice(0, 400)));
     if (head < 2 && desc < 10) return 'language';
   }
 
-  // 3) 키워드: 제목·태그·설명 어디에도 키워드(띄어쓰기 무시)나 키워드의 모든 단어가 없으면 무관한 영상
-  const hay = compact(title + ' ' + (v.tags || []).join(' ') + ' ' + v.description);
-  const q = compact(query);
-  if (q && hay.includes(q)) return null;
-  const words = String(query).split(/\s+/).map(compact).filter(w => w.length > 0);
-  if (words.length > 1 && words.every(w => hay.includes(w))) return null;
-  return q ? 'offtopic' : null;
+  // 3) 키워드: 제목·태그·설명·채널명 어디에도 키워드(띄어쓰기 무시)가 없으면 무관한 영상.
+  //    여러 단어 키워드는 단어 하나 이상이 제목에 있고 절반 이상이 어딘가에 있으면 관련 영상으로 본다.
+  if (!q) return null;
+  const hay = compact(title + ' ' + (v.tags || []).join(' ') + ' ' + description + ' ' + channelTitle);
+  if (hay.includes(q)) return null;
+  if (words.length > 1) {
+    const found = words.filter(w => hay.includes(w)).length;
+    if (found === words.length) return null;
+    if (titleHasQuery && found >= Math.ceil(words.length / 2)) return null;
+  }
+  return 'offtopic';
 }
 
 function round1(x) {

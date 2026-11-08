@@ -21,9 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   cancelStrategy: () => invoke('ai:cancel'),
 
   // Files & shell
-  saveCsv: (defaultName, content) => invoke('csv:save', { defaultName, content }),
   openExternal: (url) => invoke('shell:open-external', { url }),
-  showItemInFolder: (filePath) => invoke('shell:show-item', { filePath }),
 
   // Window controls
   window: {

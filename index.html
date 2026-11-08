@@ -12,7 +12,6 @@
   <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
-    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
     <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
@@ -61,7 +60,7 @@
       </form>
 
       <div class="filters">
-        <div class="field" title="검색 조건입니다. 바꾸면 그 형식만 다시 검색합니다. 쇼츠 = 3분 이하. 검색 할당량: 전체 3회 · 롱폼 2회 · 쇼츠 2회">
+        <div class="field" title="검색 조건입니다. 바꾸면 그 형식만 다시 검색합니다. 쇼츠 = 3분 이하. 검색 할당량: 전체 3~6회 · 롱폼 2~4회 · 쇼츠 1~3회(한국어 영상이 부족할 때만 보충 검색)">
           <span class="field-label">형식</span>
           <div class="segmented" id="format-toggle" role="group" aria-label="영상 형식">
             <button type="button" class="seg-btn active" data-format="all">전체</button>
@@ -80,15 +79,13 @@
             <button type="button" class="seg-btn active" data-period="all">전체</button>
           </div>
         </div>
-        <label class="field" title="떡상 = 조회수 1만 회 이상이면서 그 채널 평소 조회수(같은 형식 최근 영상 중앙값)의 기준 배수 이상인 영상입니다. 평소 조회수를 알 수 없는 채널은 구독자 대비 배수로 추정합니다. '전체'를 고르면 모든 영상을 보여 줍니다.">
-          <span class="field-label">떡상 배수</span>
-          <select id="outlier-filter" class="select">
-            <option value="3" selected>3배 이상</option>
-            <option value="5">5배 이상</option>
-            <option value="10">10배 이상</option>
-            <option value="0">전체</option>
-          </select>
-        </label>
+        <div class="field" title="조회수순: 기간 안에서 조회수가 높은 영상부터 가져옵니다(TrendLens 등과 같은 방식). 한국어 영상이 부족하면 관련도순으로 보충합니다.&#10;관련도순: YouTube 검색 기본 순서입니다. 조회수가 낮은 영상도 많이 섞입니다.&#10;바꾸면 다시 검색합니다">
+          <span class="field-label">검색 기준</span>
+          <div class="segmented" id="order-toggle" role="group" aria-label="검색 기준">
+            <button type="button" class="seg-btn active" data-order="viewCount">조회수순</button>
+            <button type="button" class="seg-btn" data-order="relevance">관련도순</button>
+          </div>
+        </div>
         <label class="field" title="바꾸면 자동으로 다시 검색합니다">
           <span class="field-label">주제</span>
           <select id="category-filter" class="select">
@@ -107,9 +104,6 @@
       </div>
 
       <div class="toolbar-actions">
-        <button type="button" id="btn-export-csv" class="btn btn-ghost" disabled title="검색 결과를 Excel에서 열 수 있는 CSV로 저장">
-          <svg><use href="#i-download"/></svg><span>CSV 저장</span>
-        </button>
         <button type="button" id="btn-open-settings" class="btn btn-ghost" title="API 키·AI 엔진 설정">
           <svg><use href="#i-settings"/></svg><span>설정</span><span class="dot-alert" id="settings-alert" hidden></span>
         </button>
@@ -199,6 +193,15 @@
               <button type="button" class="seg-btn" data-view="shorts">쇼츠</button>
               <button type="button" class="seg-btn" data-view="long">롱폼</button>
             </div>
+            <label class="field field-compact" id="ratio-field" title="목록에 보여 줄 영상만 좁힙니다. 떡상 = 조회수 1만 회 이상이면서 채널 평소 조회수(같은 형식 최근 영상 중앙값)의 기준 배수 이상. 평소 조회수를 알 수 없으면 구독자 대비 배수로 추정합니다.">
+              <span class="field-label">배수</span>
+              <select id="outlier-filter" class="select">
+                <option value="0" selected>전체</option>
+                <option value="3">떡상 3배 이상</option>
+                <option value="5">5배 이상</option>
+                <option value="10">10배 이상</option>
+              </select>
+            </label>
             <span class="filter-kw" id="filter-kw" hidden>
               <span>키워드</span>
               <button type="button" class="chip chip-active" id="filter-clear" title="필터 해제"><span id="filter-word"></span><svg><use href="#i-close"/></svg></button>
