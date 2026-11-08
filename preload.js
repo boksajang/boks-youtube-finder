@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld('api', {
   getConfig: () => invoke('config:get'),
   saveConfig: (config) => invoke('config:save', config),
   detectCliPath: (engine) => invoke('cli:detect-path', { engine }),
+  getConfigDefaults: () => invoke('config:defaults'),
+  validateApiKey: (key) => invoke('config:validate-key', { key }),
+  getRegions: () => invoke('meta:regions'),
+  getCategories: (region) => invoke('meta:categories', { region }),
+  getCacheStats: () => invoke('cache:stats'),
+  clearCache: () => invoke('cache:clear'),
 
   // YouTube
   searchYouTube: (params) => invoke('youtube:search', params),

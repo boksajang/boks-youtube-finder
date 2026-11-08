@@ -20,35 +20,81 @@ const state = {
   feedView: 'all',    // 전체 검색일 때 목록에서 볼 형식
   tab: 'feed',        // 왼쪽 패널 탭: feed | trends
   trends: null,
-  openTags: new Set() // 태그 패널을 펼친 영상 id
+  openTags: new Set(), // 태그 패널을 펼친 영상 id
+  searched: false,     // 한 번이라도 검색했는지(키워드 없이 검색할 수 있어 keyword 로는 판단할 수 없음)
+  label: '',           // 화면·AI에 쓰는 검색 이름(키워드 또는 "대한민국 인기 영상" 같은 조건 이름)
+  // 검색 조건 중 툴바 밖(국가·언어 팝오버)에서 고르는 값
+  region: 'KR',
+  language: 'ko',
+  langOnly: true,
+  category: '0',       // 카테고리 목록을 받기 전에 복원할 값
+  customFrom: '',
+  customTo: '',
+  regions: [],
+  categories: [],
+  activePreset: ''
 };
 
+const LANGS = [
+  ['ko', '한국어'], ['en', '영어'], ['ja', '일본어'], ['zh-Hans', '중국어(간체)'], ['zh-Hant', '중국어(번체)'],
+  ['es', '스페인어'], ['fr', '프랑스어'], ['de', '독일어'], ['pt', '포르투갈어'], ['vi', '베트남어'],
+  ['th', '태국어'], ['id', '인도네시아어'], ['hi', '힌디어'], ['ru', '러시아어']
+];
+const LANG_NAME = Object.fromEntries(LANGS);
+const FORMAT_NAME = { all: '영상', long: '롱폼', shorts: '쇼츠' };
+const SEARCH_COST = { all: '3~6회', long: '2~4회', shorts: '1~3회' };
+
+// 빠른 시작: 키워드 없이 조건만으로 인기 영상 분석(TrendLens 등과 같은 조회수순 검색)
+const PRESETS = [
+  { id: 'popular', title: r => `${r} 인기 영상`, desc: '최근 7일 · 쇼츠·롱폼', format: 'all', period: '7d', category: '0' },
+  { id: 'shorts', title: () => '지금 뜨는 쇼츠', desc: '최근 24시간 · 쇼츠', format: 'shorts', period: '24h', category: '0' },
+  { id: 'long', title: () => '인기 롱폼', desc: '최근 3일 · 롱폼', format: 'long', period: '3d', category: '0' },
+  { id: 'ent', title: () => '엔터테인먼트', desc: '최근 7일 · 엔터테인먼트', format: 'all', period: '7d', category: '24' },
+  { id: 'music', title: () => '음악', desc: '최근 7일 · 음악', format: 'all', period: '7d', category: '10' },
+  { id: 'game', title: () => '게임', desc: '최근 7일 · 게임', format: 'all', period: '7d', category: '20' }
+];
+
 // 상단 검색 조건 기억(키워드 제외). 브라우저 저장소는 app-data/electron 안에 있다.
-// v2: 목록 배수 필터 기본값을 '전체'로 바꾸고(목록 = 분석 대상) 검색 기준(조회수순/관련도순)을 추가했다.
+// 시작 조건 = 설정의 검색 기본값. [마지막 검색 조건 이어서 쓰기]가 켜져 있으면 저장된 조건으로 덮어쓴다.
+// v2: 목록 배수 필터 기본값 '전체'(목록 = 분석 대상), 검색 기준 추가 / 이후 국가·언어·직접 기간·결과 필터 추가
 const PREFS_KEY = 'boks.prefs.v2';
 const LEGACY_PREFS_KEY = 'boks.prefs.v1';
-const PREF_DEFAULTS = { format: 'all', period: 'all', category: '0', order: 'viewCount', minRatio: '0', sort: 'ratio' };
+const LIST_DEFAULTS = { minRatio: '0', minViews: '0', subsRange: 'all', sort: 'ratio' };
+
+function searchDefaults(c = state.config || {}) {
+  return {
+    format: c.defaultFormat || 'all', period: c.defaultPeriod || '7d', order: c.defaultOrder || 'viewCount', category: '0',
+    region: c.region || 'KR', language: c.language || 'ko', langOnly: c.langOnly !== false, customFrom: '', customTo: ''
+  };
+}
 
 function loadPrefs() {
+  const base = { ...searchDefaults(), ...LIST_DEFAULTS };
   const read = key => {
     const raw = JSON.parse(localStorage.getItem(key) || 'null');
     return raw && typeof raw === 'object' ? raw : null;
   };
   try {
-    const cur = read(PREFS_KEY);
-    if (cur) return { ...PREF_DEFAULTS, ...cur };
-    // 이전 버전 조건은 이어 쓰되, 예전 기본값이던 '3배 이상' 목록 필터는 가져오지 않는다
-    const old = read(LEGACY_PREFS_KEY);
-    if (old) { const { minRatio, ...rest } = old; return { ...PREF_DEFAULTS, ...rest }; }
+    // 목록 필터·정렬은 항상 이어 쓰고, 검색 조건은 설정에 따라 이어 쓴다
+    let cur = read(PREFS_KEY);
+    if (!cur) {
+      const old = read(LEGACY_PREFS_KEY);
+      if (old) { const { minRatio, ...rest } = old; cur = rest; } // 예전 기본값 '3배 이상'은 가져오지 않는다
+    }
+    if (!cur) return base;
+    const list = Object.fromEntries(Object.keys(LIST_DEFAULTS).filter(k => k in cur).map(k => [k, cur[k]]));
+    const search = state.config?.rememberLast === false ? {} : cur;
+    return { ...base, ...search, ...list };
   } catch { /* 손상 → 기본값 */ }
-  return { ...PREF_DEFAULTS };
+  return base;
 }
 
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      format: selectedFormat(), period: selectedPeriod(), order: selectedOrder(),
-      category: el.categoryFilter.value, minRatio: el.outlierFilter.value, sort: el.sortSelect.value
+      format: selectedFormat(), period: selectedPeriod(), order: selectedOrder(), category: selectedCategory(),
+      region: state.region, language: state.language, langOnly: state.langOnly, customFrom: state.customFrom, customTo: state.customTo,
+      minRatio: el.outlierFilter.value, minViews: el.viewsFilter.value, subsRange: el.subsFilter.value, sort: el.sortSelect.value
     }));
   } catch { /* 저장소를 쓸 수 없으면 이번 실행에서만 유지 */ }
 }
@@ -66,21 +112,36 @@ function setSelect(select, value) {
 
 function applyPrefs(p) {
   setSegment(el.formatToggle, 'format', p.format);
-  setSegment(el.periodToggle, 'period', p.period);
+  // 직접 지정 기간은 날짜가 있어야 쓸 수 있다
+  const custom = p.period === 'custom' && p.customFrom && p.customTo;
+  setSegment(el.periodToggle, 'period', p.period === 'custom' && !custom ? '7d' : p.period);
   setSegment(el.orderToggle, 'order', p.order);
-  setSelect(el.categoryFilter, String(p.category));
+  state.region = /^[A-Z]{2}$/.test(p.region) ? p.region : 'KR';
+  state.language = LANG_NAME[p.language] ? p.language : 'ko';
+  state.langOnly = p.langOnly !== false;
+  state.customFrom = p.customFrom || '';
+  state.customTo = p.customTo || '';
+  state.category = String(p.category || '0');
+  setSelect(el.categoryFilter, state.category);
   setSelect(el.outlierFilter, String(p.minRatio));
+  setSelect(el.viewsFilter, String(p.minViews));
+  setSelect(el.subsFilter, String(p.subsRange));
   setSelect(el.sortSelect, String(p.sort));
+  updateConditionLabels();
 }
 
 const selectedFormat = () => el.formatToggle.querySelector('.seg-btn.active')?.dataset.format || 'all';
 const selectedPeriod = () => el.periodToggle.querySelector('.seg-btn.active')?.dataset.period || 'all';
 const selectedOrder = () => el.orderToggle.querySelector('.seg-btn.active')?.dataset.order || 'viewCount';
+// 카테고리 목록을 아직 못 받았으면 복원할 값을 그대로 쓴다
+const selectedCategory = () => (state.categories.length ? el.categoryFilter.value : state.category);
 
 const OUTLIER = 3;
 const MEGA = 10;
 const BASELINE_FLOOR = 1000; // services/youtube.js 와 동일: 평소 조회수 하한
 const EXAMPLES = ['AI 부업', '쇼츠 자동화', '재테크 초보', '자취 요리'];
+const regionName = (id = state.region) => (state.regions.find(r => r.id === id) || {}).name || (id === 'KR' ? '대한민국' : id);
+const categoryName = (id = selectedCategory()) => (state.categories.find(c => c.id === id) || {}).name || '';
 
 const el = {
   searchForm: $('search-form'), searchInput: $('search-input'), searchBtn: $('search-btn'),
@@ -100,7 +161,16 @@ const el = {
   engineToggle: $('engine-toggle'), claudePath: $('setting-claude-path'), codexPath: $('setting-codex-path'),
   detectClaudeStatus: $('detect-claude-status'), detectCodexStatus: $('detect-codex-status'),
   saveBtn: $('save-settings-btn'), cancelBtn: $('btn-cancel-settings'), closeBtn: $('btn-close-settings'), saveFeedback: $('save-feedback'),
-  toastHost: $('toast-host'), winMax: $('win-max')
+  toastHost: $('toast-host'), winMax: $('win-max'),
+  customLabel: $('custom-label'), btnAdvanced: $('btn-advanced'), advSummary: $('adv-summary'), advPopover: $('adv-popover'),
+  regionSelect: $('region-select'), langSelect: $('lang-select'), langOnly: $('lang-only'), customFrom: $('custom-from'), customTo: $('custom-to'),
+  advFeedback: $('adv-feedback'), advCancel: $('adv-cancel'), advApply: $('adv-apply'), presets: $('presets'),
+  viewsFilter: $('views-filter'), subsFilter: $('subs-filter'),
+  keyCheckStatus: $('key-check-status'), btnCheckKey: $('btn-check-key'),
+  defRegion: $('def-region'), defLang: $('def-lang'), defFormat: $('def-format'), defPeriod: $('def-period'), defOrder: $('def-order'),
+  defLangOnly: $('def-lang-only'), defRemember: $('def-remember'),
+  setSearchLimit: $('set-search-limit'), setUnitLimit: $('set-unit-limit'), setCacheTtl: $('set-cache-ttl'),
+  btnClearCache: $('btn-clear-cache'), cacheStats: $('cache-stats'), btnResetDefaults: $('btn-reset-defaults')
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +235,9 @@ async function init() {
     toast('저장된 API 키를 이 PC에서 복호화하지 못했습니다. [설정]에서 키를 다시 입력해 주세요.', 'error', { label: '설정 열기', onClick: openSettings });
   }
 
+  const langItems = LANGS.map(([id, name]) => ({ id, name }));
+  fillSelect(el.langSelect, langItems, 'ko');
+  fillSelect(el.defLang, langItems, state.config.language || 'ko');
   applyPrefs(loadPrefs());
   setupWindowControls();
   setupEvents();
@@ -174,6 +247,9 @@ async function init() {
   renderAiIdle();
   refreshUsage();
   el.searchInput.focus();
+  // 국가·카테고리 목록(30일 캐시, 키가 없으면 기본 목록)
+  loadRegions();
+  loadCategories();
 }
 
 async function refreshUsage(snapshot) {
@@ -187,8 +263,9 @@ async function refreshUsage(snapshot) {
   el.usageMeter.hidden = false;
   el.usageMeter.textContent = `오늘 API 검색 ${n(u.search)}/${n(u.searchLimit)} · 조회 ${n(u.units)}/${n(u.unitLimit)}`;
   el.usageMeter.classList.toggle('warn', u.search >= u.searchLimit * 0.8 || u.units >= u.unitLimit * 0.8);
-  el.usageMeter.title = `이 PC에서 오늘(태평양 시간 ${u.day}) 쓴 YouTube API 사용량입니다. 매일 오후 4~5시(한국 시간)에 초기화됩니다. 같은 키를 다른 곳에서도 쓰면 실제 사용량은 더 많을 수 있습니다.`;
-  if (el.usageHint) el.usageHint.textContent = `오늘 이 PC 사용량: 검색 ${n(u.search)}/${n(u.searchLimit)}회 · 조회 ${n(u.units)}/${n(u.unitLimit)} 유닛`;
+  const reset = u.resetAt ? new Date(u.resetAt).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' }) : '오후 4~5시';
+  el.usageMeter.title = `이 PC에서 오늘(태평양 시간 ${u.day}) 쓴 YouTube API 사용량입니다. 한국 시간 ${reset}에 초기화됩니다. 한도는 [설정]에서 바꿀 수 있습니다. 같은 Google Cloud 프로젝트의 키를 다른 곳에서도 쓰면 실제 사용량은 더 많을 수 있습니다.`;
+  if (el.usageHint) el.usageHint.textContent = `오늘 이 PC 사용량: 검색 ${n(u.search)}/${n(u.searchLimit)}회 · 조회 ${n(u.units)}/${n(u.unitLimit)} 유닛 · 한국 시간 ${reset}에 초기화`;
 }
 
 async function setupWindowControls() {
@@ -221,7 +298,9 @@ function setupEvents() {
 
   const rerun = (label) => {
     savePrefs();
-    if (!state.keyword && !state.searching) return;
+    state.activePreset = '';
+    renderPresets();
+    if (!state.searched && !state.searching) return;
     toast(`${label} 조건을 바꿔 다시 검색합니다.`);
     if (state.searching) state.pendingRerun = true;
     else handleSearch(state.keyword);
@@ -234,9 +313,33 @@ function setupEvents() {
   });
   // 형식·기간·주제는 검색 조건 → 바뀌면 다시 검색
   segHandler(el.formatToggle, 'format', '형식');
+  // '직접'은 바로 바꾸지 않고 날짜를 고르는 창을 연다
+  el.periodToggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (btn && btn.dataset.period === 'custom') { e.stopImmediatePropagation(); openAdvanced(true); }
+  }, true);
   segHandler(el.periodToggle, 'period', '기간');
   segHandler(el.orderToggle, 'order', '검색 기준');
-  el.categoryFilter.addEventListener('change', () => rerun('주제'));
+  el.categoryFilter.addEventListener('change', () => { state.category = el.categoryFilter.value; rerun('주제'); });
+  // 국가·언어·직접 기간
+  el.btnAdvanced.addEventListener('click', () => (el.advPopover.hidden ? openAdvanced(false) : closeAdvanced()));
+  el.advCancel.addEventListener('click', closeAdvanced);
+  el.advApply.addEventListener('click', applyAdvanced);
+  window.addEventListener('resize', () => { if (!el.advPopover.hidden) positionAdvanced(); });
+  [el.customFrom, el.customTo].forEach(inp => inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyAdvanced(); }));
+  document.addEventListener('mousedown', (e) => {
+    if (el.advPopover.hidden) return;
+    if (el.advPopover.contains(e.target) || el.btnAdvanced.contains(e.target) || e.target.closest('[data-period="custom"]')) return;
+    closeAdvanced();
+  });
+  // 빠른 시작
+  el.presets.addEventListener('click', (e) => {
+    const btn = e.target.closest('.preset[data-preset]');
+    if (btn && !btn.disabled) runPreset(btn.dataset.preset);
+  });
+  // 결과 필터(할당량 사용 없음)
+  el.viewsFilter.addEventListener('change', () => { savePrefs(); onClientFilterChange(); });
+  el.subsFilter.addEventListener('change', () => { savePrefs(); onClientFilterChange(); });
   // 배수·정렬은 화면 필터 → 다시 그리기만
   el.outlierFilter.addEventListener('change', () => { savePrefs(); onClientFilterChange(); });
   el.sortSelect.addEventListener('change', () => { savePrefs(); renderFeed(); });
@@ -280,6 +383,9 @@ function setupEvents() {
   el.modal.addEventListener('mousedown', (e) => { if (e.target === el.modal) closeSettings(); });
   el.saveBtn.addEventListener('click', saveSettings);
   el.apiKey.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveSettings(); });
+  el.btnCheckKey.addEventListener('click', checkKey);
+  el.btnClearCache.addEventListener('click', clearCache);
+  el.btnResetDefaults.addEventListener('click', resetSettingDefaults);
   el.btnToggleKey.addEventListener('click', () => {
     const show = el.apiKey.type === 'password';
     el.apiKey.type = show ? 'text' : 'password';
@@ -293,6 +399,7 @@ function setupEvents() {
   $('btn-open-console').addEventListener('click', () => window.api.openExternal('https://console.cloud.google.com/apis/library/youtube.googleapis.com'));
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.advPopover.hidden) { closeAdvanced(); el.btnAdvanced.focus(); return; }
     if (e.key === 'Escape' && !el.modal.hidden) closeSettings();
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
       e.preventDefault();
@@ -308,17 +415,28 @@ function setupEvents() {
 
 function setSearching(on) {
   state.searching = on;
+  renderPresets();
   el.searchBtn.disabled = on;
   el.searchBtn.classList.toggle('is-loading', on);
   el.searchBtn.querySelector('.btn-label').textContent = on ? '분석 중' : '분석하기';
   el.btnAiRun.disabled = on || state.aiRunning || state.videos.length === 0;
 }
 
-async function handleSearch(forcedQuery) {
+// 키워드 없이 검색할 때의 이름: "대한민국 인기 영상", "대한민국 게임 인기 쇼츠"
+function autoLabel() {
+  const cat = selectedCategory() !== '0' ? categoryName() : '';
+  return `${regionName()} ${cat ? cat + ' ' : ''}인기 ${FORMAT_NAME[selectedFormat()]}`;
+}
+
+/**
+ * @param forcedQuery 키워드(비우면 조건에 맞는 인기 영상 전체)
+ * @param opts.preset 빠른 시작으로 실행한 경우 그 id, opts.label 표시 이름
+ */
+async function handleSearch(forcedQuery, opts = {}) {
   const query = (forcedQuery ?? el.searchInput.value).trim();
-  if (!query) {
-    toast('분석할 키워드를 입력해 주세요.');
-    el.searchInput.focus();
+  if (selectedPeriod() === 'custom' && !(state.customFrom && state.customTo)) {
+    toast('직접 지정할 기간(시작일·종료일)을 먼저 골라 주세요.');
+    openAdvanced(true);
     return;
   }
   if (!state.config.youtubeApiKey) {
@@ -330,6 +448,9 @@ async function handleSearch(forcedQuery) {
 
   const seq = ++state.searchSeq;
   el.searchInput.value = query;
+  const label = query || opts.label || autoLabel();
+  state.activePreset = query ? '' : (opts.preset || '');
+  renderPresets();
   setSearching(true);
   stopAi('새 검색이 끝나면 기획안을 다시 만듭니다.');
   el.feed.innerHTML = Array.from({ length: 6 }, () => '<div class="skeleton"></div>').join('');
@@ -337,10 +458,15 @@ async function handleSearch(forcedQuery) {
 
   const res = await window.api.searchYouTube({
     query,
-    videoCategoryId: el.categoryFilter.value,
+    videoCategoryId: selectedCategory(),
     publishedPeriod: selectedPeriod(),
+    customFrom: state.customFrom,
+    customTo: state.customTo,
     format: selectedFormat(),
-    order: selectedOrder()
+    order: selectedOrder(),
+    region: state.region,
+    language: state.language,
+    langOnly: state.langOnly
   });
   if (seq !== state.searchSeq) return;
   setSearching(false);
@@ -362,6 +488,8 @@ async function handleSearch(forcedQuery) {
   }
 
   state.keyword = query;
+  state.label = label;
+  state.searched = true;
   state.videos = res.data.videos;
   state.analytics = res.data.analytics;
   state.trends = res.data.trends;
@@ -395,6 +523,8 @@ async function handleSearch(forcedQuery) {
 function resetResults() {
   stopAi();
   state.keyword = '';
+  state.label = '';
+  state.searched = false;
   state.videos = [];
   state.analytics = null;
   state.trends = null;
@@ -407,6 +537,142 @@ function resetResults() {
 }
 
 // ---------------------------------------------------------------------------
+// Conditions: 국가·언어·직접 기간·빠른 시작
+// ---------------------------------------------------------------------------
+
+const kstToday = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+const shortDate = d => { const p = String(d).split('-'); return p.length === 3 ? `${+p[1]}.${+p[2]}` : d; };
+
+// 목록에 현재값이 없으면(기본 목록만 받은 경우 등) 그 값을 항목으로 넣어, 조용히 첫 항목으로 바뀌지 않게 한다
+function fillSelect(select, items, value) {
+  const list = value && !items.some(it => it.id === value) ? [...items, { id: value, name: value }] : items;
+  select.innerHTML = list.map(it => `<option value="${esc(it.id)}">${esc(it.name)}</option>`).join('');
+  setSelect(select, value);
+}
+
+function updateConditionLabels() {
+  const lang = LANG_NAME[state.language] || state.language;
+  el.advSummary.textContent = `${regionName()} · ${lang}${state.langOnly ? '' : ' 외'}`;
+  el.btnAdvanced.title = `국가 ${regionName()} · 언어 ${lang} · ${state.langOnly ? `${lang} 영상만 분석` : '다른 언어 영상도 분석'} · 기간 직접 지정`;
+  const custom = state.customFrom && state.customTo;
+  el.customLabel.textContent = custom ? `${shortDate(state.customFrom)}~${shortDate(state.customTo)}` : '직접';
+  renderPresets();
+}
+
+async function loadRegions() {
+  const res = await window.api.getRegions();
+  // YouTube 국가 이름은 '한국'이라 화면에서는 '대한민국'으로 쓴다
+  if (res.ok) state.regions = res.data.items.map(r => (r.id === 'KR' ? { ...r, name: '대한민국' } : r));
+  const list = [...state.regions].sort((a, b) => (b.id === 'KR') - (a.id === 'KR'));
+  fillSelect(el.regionSelect, list, state.region);
+  fillSelect(el.defRegion, list, state.config.region || 'KR');
+  updateConditionLabels();
+  if (res.ok && res.data.source === 'api') refreshUsage(); // 처음 받을 때 1 유닛 사용
+}
+
+async function loadCategories(region = state.region) {
+  const res = await window.api.getCategories(region);
+  if (region !== state.region) return; // 그사이 국가가 바뀌었으면 버림
+  if (!res.ok) return; // 목록을 못 받으면 복원할 주제(state.category)를 그대로 둔다
+  state.categories = res.data.items;
+  const want = state.category;
+  el.categoryFilter.innerHTML = '<option value="0">전체</option>' + state.categories.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  setSelect(el.categoryFilter, want);
+  state.category = el.categoryFilter.value; // 이 국가에 없는 주제면 '전체'
+  renderPresets();
+  if (res.ok && res.data.source === 'api') refreshUsage();
+}
+
+function renderPresets() {
+  if (!el.presets) return;
+  const r = regionName();
+  el.presets.innerHTML = PRESETS.map(p => {
+    const missing = p.category !== '0' && state.categories.length > 0 && !state.categories.some(c => c.id === p.category);
+    const tip = `${p.title(r)} · ${p.desc} · 조회수순 · 키워드 없이 분석 · 검색 ${SEARCH_COST[p.format]}${missing ? ' · 이 국가에서는 쓸 수 없는 주제입니다' : ''}`;
+    return `<button type="button" class="preset${state.activePreset === p.id ? ' active' : ''}" data-preset="${p.id}" title="${esc(tip)}"${missing || state.searching ? ' disabled' : ''}><strong>${esc(p.title(r))}</strong><span>${esc(p.desc)}</span></button>`;
+  }).join('');
+}
+
+function runPreset(id) {
+  const p = PRESETS.find(x => x.id === id);
+  if (!p || state.searching) return;
+  el.searchInput.value = '';
+  setSegment(el.formatToggle, 'format', p.format);
+  setSegment(el.periodToggle, 'period', p.period);
+  setSegment(el.orderToggle, 'order', 'viewCount');
+  state.category = p.category;
+  setSelect(el.categoryFilter, p.category);
+  savePrefs();
+  handleSearch('', { preset: p.id, label: p.title(regionName()) });
+}
+
+function openAdvanced(focusDates = false) {
+  setSelect(el.regionSelect, state.region);
+  setSelect(el.langSelect, state.language);
+  el.langOnly.checked = state.langOnly;
+  el.customFrom.value = state.customFrom;
+  el.customTo.value = state.customTo;
+  el.customFrom.max = el.customTo.max = kstToday();
+  el.advFeedback.textContent = '';
+  el.advFeedback.className = 'form-hint';
+  el.advPopover.hidden = false;
+  positionAdvanced();
+  el.btnAdvanced.setAttribute('aria-expanded', 'true');
+  (focusDates ? el.customFrom : el.regionSelect).focus();
+}
+
+// 버튼 아래, 창 안쪽에 맞춰 띄운다(툴바가 줄바꿈되면 버튼 위치가 바뀌므로 열 때마다 계산)
+function positionAdvanced() {
+  const r = el.btnAdvanced.getBoundingClientRect();
+  const w = el.advPopover.offsetWidth;
+  const h = el.advPopover.offsetHeight;
+  const left = Math.min(Math.max(8, r.right - w), window.innerWidth - w - 8);
+  const below = r.bottom + 6;
+  const top = below + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 6) : below;
+  el.advPopover.style.left = `${Math.round(left)}px`;
+  el.advPopover.style.top = `${Math.round(top)}px`;
+}
+
+function closeAdvanced() {
+  el.advPopover.hidden = true;
+  el.btnAdvanced.setAttribute('aria-expanded', 'false');
+}
+
+async function applyAdvanced() {
+  const from = el.customFrom.value;
+  const to = el.customTo.value;
+  const fail = msg => { el.advFeedback.className = 'form-hint err'; el.advFeedback.textContent = msg; };
+  if ((from && !to) || (!from && to)) return fail('기간을 직접 지정하려면 시작일과 종료일을 모두 골라 주세요. 쓰지 않으려면 둘 다 비우세요.');
+  if (from && to && from > to) return fail('시작일이 종료일보다 늦습니다.');
+  if (from && from > kstToday()) return fail('시작일이 오늘보다 늦습니다.');
+  const before = JSON.stringify([state.region, state.language, state.langOnly, state.customFrom, state.customTo, selectedPeriod()]);
+  const region = el.regionSelect.value || state.region;
+  const regionChanged = region !== state.region;
+  state.region = region;
+  state.language = el.langSelect.value || state.language;
+  state.langOnly = el.langOnly.checked;
+  state.customFrom = from;
+  state.customTo = to;
+  if (from && to) setSegment(el.periodToggle, 'period', 'custom');
+  else if (selectedPeriod() === 'custom') setSegment(el.periodToggle, 'period', '7d');
+  closeAdvanced();
+  const changed = before !== JSON.stringify([state.region, state.language, state.langOnly, state.customFrom, state.customTo, selectedPeriod()]);
+  if (!changed) return;
+  state.activePreset = '';
+  updateConditionLabels();
+  if (regionChanged) {
+    state.category = selectedCategory();
+    await loadCategories();
+  }
+  savePrefs();
+  // 다른 조건 변경과 같은 규칙: 이미 검색한 결과가 있을 때만 그 키워드로 다시 검색
+  if (!state.searched && !state.searching) { toast('조건을 바꿨습니다. [분석하기]나 [빠른 시작]을 누르면 이 조건으로 검색합니다.'); return; }
+  toast('국가·언어·기간 조건을 바꿔 다시 검색합니다.');
+  if (state.searching) state.pendingRerun = true;
+  else handleSearch(state.keyword);
+}
+
+// ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------
 
@@ -415,8 +681,16 @@ function currentFilters() {
     // 전체 검색일 때만 목록 안에서 쇼츠/롱폼을 나눠 본다(검색 형식이 한 가지면 이미 그 형식뿐)
     format: state.format === 'all' ? state.feedView : 'all',
     minRatio: parseFloat(el.outlierFilter.value) || 0,
+    minViews: parseInt(el.viewsFilter.value, 10) || 0,
+    subs: parseRange(el.subsFilter.value),
     keyword: state.keywordFilter
   };
+}
+
+// 'lo-hi' → { lo, hi }(lo 이상 hi 미만, hi 비면 상한 없음). 'all' → null
+function parseRange(v) {
+  const m = /^(\d+)-(\d*)$/.exec(String(v || ''));
+  return m ? { lo: Number(m[1]), hi: m[2] === '' ? Infinity : Number(m[2]) } : null;
 }
 
 function passesFilters(v, f = currentFilters()) {
@@ -424,6 +698,9 @@ function passesFilters(v, f = currentFilters()) {
   if (f.format === 'shorts' && !v.isShorts) return false;
   // 배수 필터는 떡상 판정 대상(조회수 하한선 통과) 영상에만 적용
   if (f.minRatio > 0 && !(v.qualifies && v.score >= f.minRatio)) return false;
+  if (f.minViews > 0 && v.viewCount < f.minViews) return false;
+  // 구독자 범위: 구독자 비공개 채널은 범위를 알 수 없어 뺀다
+  if (f.subs && (v.subscriberCount === null || v.subscriberCount === undefined || v.subscriberCount < f.subs.lo || v.subscriberCount >= f.subs.hi)) return false;
   if (f.keyword && !v.title.toLowerCase().includes(f.keyword.toLowerCase())) return false;
   return true;
 }
@@ -570,7 +847,7 @@ function renderFeed() {
   if (!hasVideos) {
     el.feedCount.textContent = '';
     el.filterNote.textContent = '';
-    el.feed.innerHTML = state.keyword ? noResultHtml() : onboardingHtml();
+    el.feed.innerHTML = state.searched ? noResultHtml() : onboardingHtml();
     return;
   }
 
@@ -581,6 +858,8 @@ function renderFeed() {
   el.filterNote.textContent = note.text;
   el.filterNote.title = note.title;
   el.outlierFilter.classList.toggle('is-on', f.minRatio > 0);
+  el.viewsFilter.classList.toggle('is-on', f.minViews > 0);
+  el.subsFilter.classList.toggle('is-on', !!f.subs);
   el.feedCount.textContent = filtered ? `${list.length}/${state.videos.length}` : `${list.length}`;
   el.feedCount.title = filtered ? `필터로 ${list.length}개만 표시 중 · 분석 대상 ${state.videos.length}개` : `분석 대상 ${list.length}개`;
 
@@ -589,8 +868,9 @@ function renderFeed() {
       <div class="state">
         <div class="state-icon">${icon('search')}</div>
         <h3>조건에 맞는 영상이 없습니다</h3>
-        <p>배수 필터를 '전체'로 바꾸거나 형식·키워드 필터를 해제해 보세요.</p>
+        <p>배수·조회수·구독자 필터를 '전체'로 바꾸거나 형식·키워드 필터를 해제해 보세요.</p>
         <div class="actions">
+          ${(f.minViews > 0 || f.subs) ? '<button type="button" class="btn btn-ghost btn-sm" data-act="reset-list-filters">목록 필터 모두 해제</button>' : ''}
           ${f.minRatio > 0 ? '<button type="button" class="btn btn-ghost btn-sm" data-act="ratio-all">배수 전체 보기</button>' : ''}
           ${f.keyword ? '<button type="button" class="btn btn-ghost btn-sm" data-act="clear-keyword">키워드 필터 해제</button>' : ''}
           ${f.format !== 'all' ? '<button type="button" class="btn btn-ghost btn-sm" data-act="format-all">형식 전체 보기</button>' : ''}
@@ -622,7 +902,8 @@ function scoreTitle(v) {
   if (v.scoreBasis === 'baseline') {
     return `이 채널의 최근 ${v.isShorts ? '쇼츠' : '롱폼'} ${v.baselineSampleSize}개 조회수 중앙값(${v.channelBaselineFormatted}회)의 ${v.scoreFormatted}입니다.${low}`;
   }
-  return `채널의 최근 영상이 부족해 평소 조회수를 계산하지 못했습니다. 대신 구독자 수 대비 배수(${v.scoreFormatted})로 추정했습니다.${low}`;
+  const floorNote = v.subscriberCount !== null && v.subscriberCount < BASELINE_FLOOR ? ` 구독자가 ${BASELINE_FLOOR.toLocaleString('ko-KR')}명 미만이라 ${BASELINE_FLOOR.toLocaleString('ko-KR')}명으로 계산했습니다(실제 구독자 대비 ${v.subsRatioFormatted}).` : '';
+  return `채널의 최근 영상이 부족해 평소 조회수를 계산하지 못했습니다. 대신 구독자 수 대비 배수(${v.scoreFormatted})로 추정했습니다.${floorNote}${low}`;
 }
 
 function minViewsLabel() {
@@ -694,12 +975,12 @@ function onboardingHtml() {
   return `
     <div class="state">
       <div class="state-icon">${icon('trend')}</div>
-      <h3>키워드 하나로 떡상 영상을 찾아보세요</h3>
-      <p>그 채널의 평소 조회수보다 크게 터진 영상을 골라내고, AI가 바로 만들 수 있는 기획안을 제안합니다.</p>
+      <h3>빠른 시작을 누르거나 키워드로 떡상 영상을 찾아보세요</h3>
+      <p>그 채널의 평소 조회수보다 크게 터진 영상을 골라내고, AI가 바로 만들 수 있는 기획안을 제안합니다. 키워드를 비우면 국가·주제·기간 조건에 맞는 인기 영상 전체를 분석합니다.</p>
       <ol class="steps">
         <li class="${hasKey ? 'done' : ''}"><span class="n">${hasKey ? '✓' : '1'}</span>YouTube API 키 등록${hasKey ? ' 완료' : ''}
           ${hasKey ? '' : '<button type="button" class="btn btn-primary btn-sm" data-act="open-settings">설정 열기</button>'}</li>
-        <li><span class="n">2</span>상단 검색창에 키워드 입력 후 Enter</li>
+        <li><span class="n">2</span>위의 [빠른 시작]을 누르거나, 검색창에 키워드를 입력하고 Enter</li>
       </ol>
       ${hasKey ? `<div class="actions"><span class="field-label">예시로 바로 분석</span>${EXAMPLES.map(k => `<button type="button" class="chip" data-act="example" data-word="${esc(k)}">${esc(k)}</button>`).join('')}</div>` : ''}
     </div>`;
@@ -710,13 +991,14 @@ function noResultHtml() {
     <div class="state">
       <div class="state-icon">${icon('search')}</div>
       <h3>검색 결과가 없습니다</h3>
-      <p>"${esc(state.keyword)}"에 맞는 영상을 찾지 못했습니다. 주제·기간 조건을 넓히거나 다른 키워드로 검색해 보세요.</p>
+      <p>"${esc(state.label)}"에 맞는 영상을 찾지 못했습니다. 주제·기간 조건을 넓히거나${state.langOnly ? ' [국가·언어]에서 \'선택한 언어 영상만\'을 끄거나' : ''} 다른 키워드로 검색해 보세요.</p>
       <div class="actions"><button type="button" class="btn btn-ghost btn-sm" data-act="reset-server-filters">주제·기간 초기화 후 다시 검색</button></div>
     </div>`;
 }
 
 function renderFeedError(err) {
-  const keyIssue = ['NO_API_KEY', 'KEY_INVALID', 'API_DISABLED', 'FORBIDDEN'].includes(err.code);
+  const keyIssue = ['NO_API_KEY', 'KEY_INVALID', 'API_DISABLED', 'FORBIDDEN', 'QUOTA_LOCAL', 'QUOTA_BUDGET'].includes(err.code);
+  const rangeIssue = err.code === 'BAD_RANGE';
   el.feedCount.textContent = '';
   el.feed.innerHTML = `
     <div class="state">
@@ -725,6 +1007,7 @@ function renderFeedError(err) {
       <p>${esc(err.message)}</p>
       <div class="actions">
         ${keyIssue ? '<button type="button" class="btn btn-primary btn-sm" data-act="open-settings">설정 열기</button>' : ''}
+        ${rangeIssue ? '<button type="button" class="btn btn-primary btn-sm" data-act="open-advanced">기간 다시 지정</button>' : ''}
         <button type="button" class="btn btn-ghost btn-sm" data-act="retry-search">다시 시도</button>
       </div>
       ${err.detail ? `<details class="details"><summary>자세한 오류 정보</summary><pre>${esc(err.detail)}</pre></details>` : ''}
@@ -760,7 +1043,19 @@ async function onFeedClick(e) {
     handleSearch();
   } else if (act === 'ratio-all') {
     el.outlierFilter.value = '0';
+    savePrefs();
     onClientFilterChange();
+  } else if (act === 'reset-list-filters') {
+    el.outlierFilter.value = '0';
+    el.viewsFilter.value = '0';
+    el.subsFilter.value = 'all';
+    state.keywordFilter = '';
+    state.feedView = setSegment(el.feedFormat, 'view', 'all');
+    savePrefs();
+    renderKeywordChips();
+    onClientFilterChange();
+  } else if (act === 'open-advanced') {
+    openAdvanced(true);
   } else if (act === 'clear-keyword') {
     setKeywordFilter('');
   } else if (act === 'format-all') {
@@ -768,6 +1063,7 @@ async function onFeedClick(e) {
     onClientFilterChange();
   } else if (act === 'reset-server-filters') {
     el.categoryFilter.value = '0';
+    state.category = '0';
     setSegment(el.periodToggle, 'period', 'all');
     savePrefs();
     handleSearch(state.keyword);
@@ -812,7 +1108,9 @@ async function runAi() {
     if (node) node.textContent = `${Math.round((Date.now() - started) / 1000)}초`;
   }, 1000);
 
-  const res = await window.api.generateStrategy({ keyword: state.keyword, videos: state.videos, format: state.format });
+  // 키워드 없이 찾은 경우 AI에는 조건 이름을 넘긴다
+  const keyword = state.keyword || `${state.label} (키워드 없이 조건으로 찾은 인기 영상)`;
+  const res = await window.api.generateStrategy({ keyword, videos: state.videos, format: state.format });
   clearInterval(timer);
   if (seq !== state.aiSeq) return; // 더 최신 요청이 있음
   setAiRunning(false);
@@ -913,7 +1211,7 @@ function renderAiReport(r) {
     ? `쇼츠 ${r.basisShorts}개 · 롱폼 ${r.basisLong}개`
     : `${r.format === 'shorts' ? '쇼츠' : '롱폼'} ${r.basisCount}개`;
   el.aiBody.innerHTML = `
-    <div class="ai-basis">"${esc(state.keyword)}" ${basis}${r.basisSupplemented ? '(떡상이 적어 조회수 상위 포함)' : ''}와 트렌드 통계 기반 · ${esc(r.engine)} CLI</div>
+    <div class="ai-basis">"${esc(state.label)}" ${basis}${r.basisSupplemented ? '(떡상이 적어 조회수 상위 포함)' : ''}와 트렌드 통계 기반 · ${esc(r.engine)} CLI</div>
     <section class="ai-block">
       <h4>떡상 패턴 요약</h4>
       <p>${esc(r.summary)}</p>
@@ -947,8 +1245,8 @@ function onAiClick(e) {
 const C_SHORTS = '#d95926';
 const C_LONG = '#3987e5';
 const C_OUT = '#f5b942';
-const C_REST = '#3a4a6b';
-const TIER_COLORS = { micro: '#9ec5f4', small: '#6da7ec', mid: '#3987e5', large: '#1c5cab', hidden: '#56627c' };
+const C_REST = '#4a4a4a';
+const TIER_COLORS = { micro: '#9ec5f4', small: '#6da7ec', mid: '#3987e5', large: '#1c5cab', hidden: '#6b6b6b' };
 
 function setTab(tab) {
   state.tab = tab === 'trends' ? 'trends' : 'feed';
@@ -1262,7 +1560,7 @@ function drawScatter() {
   // x = 채널 평소 조회수(같은 형식 최근 영상 중앙값), y = 영상 조회수. 추정(구독자 대비) 영상은 그리지 않는다.
   const pts = state.videos.filter(v => v.scoreBasis === 'baseline' && v.channelBaseline !== null);
   if (pts.length === 0) {
-    ctx.fillStyle = '#7486a6';
+    ctx.fillStyle = '#8c8c8c';
     ctx.font = '12px Malgun Gothic, sans-serif';
     ctx.fillText('채널 평소 조회수를 확인할 수 있는 영상이 없습니다.', pad.left, H / 2);
     chartPoints = [];
@@ -1286,9 +1584,9 @@ function drawScatter() {
   ctx.textBaseline = 'middle';
   for (let e = yMin; e <= yMax; e++) {
     const y = Math.round(Y(10 ** e)) + 0.5;
-    ctx.strokeStyle = '#1b2742';
+    ctx.strokeStyle = '#2a2a2a';
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
-    ctx.fillStyle = '#6f809f';
+    ctx.fillStyle = '#8c8c8c';
     ctx.textAlign = 'right';
     ctx.fillText(axisLabel(10 ** e), pad.left - 6, y);
   }
@@ -1296,15 +1594,15 @@ function drawScatter() {
   ctx.textAlign = 'center';
   for (let e = xMin; e <= xMax; e++) {
     const x = Math.round(X(10 ** e)) + 0.5;
-    ctx.strokeStyle = '#1b2742';
+    ctx.strokeStyle = '#2a2a2a';
     ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + ph); ctx.stroke();
-    ctx.fillStyle = '#6f809f';
+    ctx.fillStyle = '#8c8c8c';
     ctx.fillText(axisLabel(10 ** e), x, pad.top + ph + 6);
   }
   // reference lines: 조회수 = max(평소, 하한) × k. 하한(1,000회) 아래 구간은 수평선이 된다.
   ctx.save();
   ctx.beginPath(); ctx.rect(pad.left, pad.top, pw, ph); ctx.clip();
-  const refs = [[1, 'rgba(116,134,166,0.35)'], [OUTLIER, 'rgba(142,162,255,0.7)'], [MEGA, 'rgba(245,185,66,0.75)']];
+  const refs = [[1, 'rgba(170,170,170,0.3)'], [OUTLIER, 'rgba(142,162,255,0.7)'], [MEGA, 'rgba(245,185,66,0.75)']];
   const s0 = 10 ** xMin;
   const s1 = 10 ** xMax;
   const knee = Math.min(s1, Math.max(s0, BASELINE_FLOOR));
@@ -1330,15 +1628,15 @@ function drawScatter() {
   });
   const order = p => (p.video.id === hoverId ? 9 : p.dim ? 0 : p.tier);
   const drawList = [...chartPoints].sort((a, b) => order(a) - order(b));
-  const colors = { 1: '#6b7a96', 2: '#8ea2ff', 3: '#f5b942' };
+  const colors = { 1: '#8a8a8a', 2: '#8ea2ff', 3: '#f5b942' };
   // 전체 검색에서는 쇼츠를 속 빈 원으로 그려 롱폼과 구분한다(색은 배수 등급 그대로)
   const ringShorts = state.format === 'all';
   for (const p of drawList) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    const color = p.dim ? '#2b3856' : colors[p.tier];
+    const color = p.dim ? '#3a3a3a' : colors[p.tier];
     if (ringShorts && p.video.isShorts) {
-      ctx.fillStyle = 'rgba(10,16,32,0.85)';
+      ctx.fillStyle = 'rgba(15,15,15,0.85)';
       ctx.fill();
       ctx.lineWidth = 2;
       ctx.strokeStyle = color;
@@ -1360,7 +1658,7 @@ function drawScatter() {
       ctx.stroke();
     } else if (!p.dim) {
       ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(10,16,32,0.9)';
+      ctx.strokeStyle = 'rgba(15,15,15,0.9)';
       ctx.stroke();
     }
   }
@@ -1393,6 +1691,15 @@ function openSettings() {
   el.keyStorageHint.textContent = c.encryptionAvailable
     ? 'API 키는 OS 보호 저장소로 암호화해 앱 폴더(app-data) 안에만 저장합니다.'
     : '이 PC에서는 OS 암호화를 쓸 수 없어 API 키를 앱 폴더(app-data)에 평문으로 저장합니다.';
+  state.keyCheck = null;
+  setKeyStatus(c.keyCheckedAt
+    ? `마지막 확인: ${new Date(c.keyCheckedAt).toLocaleString('ko-KR')} · 정상 동작`
+    : (c.youtubeApiKey ? '아직 확인하지 않은 키입니다. [키 확인]으로 동작 여부를 볼 수 있습니다(조회 1 유닛).' : ''), c.keyCheckedAt ? 'ok' : '');
+  fillSettingFields(c);
+  el.btnClearCache.textContent = '캐시 비우기';
+  el.btnClearCache.classList.remove('is-confirm');
+  refreshCacheStats();
+  refreshUsage();
   el.modal.hidden = false;
   (c.youtubeApiKey ? el.saveBtn : el.apiKey).focus();
 }
@@ -1422,32 +1729,138 @@ async function detectCli(btn) {
   }
 }
 
-async function saveSettings() {
+// 설정 화면의 검색 기본값·한도·캐시 칸 채우기
+function fillSettingFields(c) {
+  setSelect(el.defRegion, c.region || 'KR');
+  setSelect(el.defLang, c.language || 'ko');
+  setSelect(el.defFormat, c.defaultFormat || 'all');
+  setSelect(el.defPeriod, c.defaultPeriod || '7d');
+  setSelect(el.defOrder, c.defaultOrder || 'viewCount');
+  el.defLangOnly.checked = c.langOnly !== false;
+  el.defRemember.checked = c.rememberLast !== false;
+  el.setSearchLimit.value = c.searchLimit ?? 100;
+  el.setUnitLimit.value = c.unitLimit ?? 10000;
+  setSelect(el.setCacheTtl, String(c.cacheTtlHours ?? 24));
+}
+
+function setKeyStatus(text, tone = '') {
+  el.keyCheckStatus.textContent = text;
+  el.keyCheckStatus.className = `form-hint${tone ? ' ' + tone : ''}`;
+}
+
+const KEY_FATAL = ['KEY_FORMAT', 'KEY_INVALID', 'API_DISABLED', 'FORBIDDEN'];
+
+async function checkKey() {
   const key = el.apiKey.value.trim();
-  if (key && !/^AIza[0-9A-Za-z_-]{35}$/.test(key)) {
-    el.saveFeedback.className = 'form-feedback err';
-    el.saveFeedback.textContent = 'API 키 형식이 아닙니다. AIza로 시작하는 39자리인지 확인해 주세요.';
-    el.apiKey.focus();
+  if (!key) { setKeyStatus('확인할 API 키를 입력해 주세요.', 'err'); el.apiKey.focus(); return; }
+  el.btnCheckKey.disabled = true;
+  setKeyStatus('확인 중…');
+  const res = await window.api.validateApiKey(key);
+  el.btnCheckKey.disabled = false;
+  if (res.ok) {
+    state.keyCheck = { key, at: res.data.checkedAt };
+    setKeyStatus('정상 동작하는 키입니다(조회 1 유닛 사용). 저장을 눌러 적용하세요.', 'ok');
+  } else {
+    state.keyCheck = null;
+    setKeyStatus(res.error.message, 'err');
+  }
+  refreshUsage();
+}
+
+async function refreshCacheStats() {
+  const res = await window.api.getCacheStats();
+  if (!res.ok) { el.cacheStats.textContent = ''; return; }
+  const st = res.data;
+  const kb = st.bytes >= 1048576 ? `${(st.bytes / 1048576).toFixed(1)}MB` : `${Math.max(0, Math.round(st.bytes / 1024))}KB`;
+  const oldest = st.oldest ? ` · 가장 오래된 항목 ${new Date(st.oldest).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : '';
+  el.cacheStats.textContent = `지금 저장된 채널 ${st.channels.toLocaleString('ko-KR')}개 · ${kb}${oldest}`;
+}
+
+// 두 번 눌러야 비운다(실수 방지). 지우는 것은 다시 받을 수 있는 캐시뿐이다.
+async function clearCache() {
+  if (!el.btnClearCache.classList.contains('is-confirm')) {
+    el.btnClearCache.classList.add('is-confirm');
+    el.btnClearCache.textContent = '한 번 더 눌러 비우기';
+    clearTimeout(state.clearCacheTimer);
+    state.clearCacheTimer = setTimeout(() => { el.btnClearCache.classList.remove('is-confirm'); el.btnClearCache.textContent = '캐시 비우기'; }, 4000);
     return;
   }
+  clearTimeout(state.clearCacheTimer);
+  el.btnClearCache.classList.remove('is-confirm');
+  el.btnClearCache.textContent = '캐시 비우기';
+  const res = await window.api.clearCache();
+  if (!res.ok) return toast(res.error.message, 'error');
+  refreshCacheStats();
+  toast('캐시를 비웠습니다. 다음 검색부터 채널 평소 조회수를 새로 받습니다.', 'success');
+}
+
+async function resetSettingDefaults() {
+  const res = await window.api.getConfigDefaults();
+  if (!res.ok) return toast(res.error.message, 'error');
+  fillSettingFields(res.data);
+  el.saveFeedback.className = 'form-feedback';
+  el.saveFeedback.textContent = '기본값을 채웠습니다. [저장]을 눌러야 적용됩니다.';
+}
+
+async function saveSettings() {
+  const key = el.apiKey.value.trim();
+  const fail = (msg, focus) => {
+    el.saveFeedback.className = 'form-feedback err';
+    el.saveFeedback.textContent = msg;
+    if (focus) focus.focus();
+  };
+  if (key && !/^AIza[0-9A-Za-z_-]{35}$/.test(key)) return fail('API 키 형식이 아닙니다. AIza로 시작하는 39자리인지 확인해 주세요.', el.apiKey);
+  const searchLimit = Math.round(Number(el.setSearchLimit.value));
+  const unitLimit = Math.round(Number(el.setUnitLimit.value));
+  if (!(searchLimit >= 1 && searchLimit <= 100000)) return fail('하루 검색 한도는 1~100,000 사이로 입력해 주세요.', el.setSearchLimit);
+  if (!(unitLimit >= 100 && unitLimit <= 10000000)) return fail('하루 조회 한도는 100~10,000,000 사이로 입력해 주세요.', el.setUnitLimit);
+
   el.saveBtn.disabled = true;
-  const res = await window.api.saveConfig({
+  // 키를 바꿨으면 저장 전에 실제로 동작하는지 확인(1 유닛). 키 자체가 잘못된 경우만 막고, 일시적인 실패는 저장한다.
+  let keyCheckedAt;
+  let warn = '';
+  const keyChanged = key && key !== state.config.youtubeApiKey;
+  if (keyChanged) {
+    if (state.keyCheck && state.keyCheck.key === key) {
+      keyCheckedAt = state.keyCheck.at;
+    } else {
+      el.saveFeedback.className = 'form-feedback';
+      el.saveFeedback.textContent = '키 확인 중…';
+      const v = await window.api.validateApiKey(key);
+      if (v.ok) keyCheckedAt = v.data.checkedAt;
+      else if (KEY_FATAL.includes(v.error.code)) { el.saveBtn.disabled = false; setKeyStatus(v.error.message, 'err'); return fail('API 키를 확인하지 못해 저장하지 않았습니다.', el.apiKey); }
+      else warn = ` 다만 키를 확인하지 못했습니다(${v.error.message}).`;
+    }
+  }
+  const payload = {
     youtubeApiKey: key,
     aiEngine: el.engineToggle.querySelector('.seg-btn.active')?.dataset.engine || 'claude',
     claudeCliPath: el.claudePath.value.trim(),
-    codexCliPath: el.codexPath.value.trim()
-  });
+    codexCliPath: el.codexPath.value.trim(),
+    region: el.defRegion.value || state.config.region || 'KR',
+    language: el.defLang.value || state.config.language || 'ko',
+    langOnly: el.defLangOnly.checked,
+    defaultFormat: el.defFormat.value,
+    defaultPeriod: el.defPeriod.value,
+    defaultOrder: el.defOrder.value,
+    rememberLast: el.defRemember.checked,
+    searchLimit,
+    unitLimit,
+    cacheTtlHours: Number(el.setCacheTtl.value)
+  };
+  if (!keyChanged && key && state.keyCheck && state.keyCheck.key === key) keyCheckedAt = state.keyCheck.at;
+  if (keyCheckedAt) payload.keyCheckedAt = keyCheckedAt;
+  const res = await window.api.saveConfig(payload);
   el.saveBtn.disabled = false;
-  if (!res.ok) {
-    el.saveFeedback.className = 'form-feedback err';
-    el.saveFeedback.textContent = res.error.message;
-    return;
-  }
+  if (!res.ok) return fail(res.error.message);
   state.config = { ...state.config, ...res.data };
   refreshConfigUI();
+  refreshUsage();
   closeSettings();
-  toast('설정을 저장했습니다.', 'success');
-  if (state.videos.length === 0 && !state.keyword) renderFeed();
+  toast(`설정을 저장했습니다.${warn}`, warn ? 'info' : 'success');
+  // 키를 처음 넣었거나 바꿨으면 국가·카테고리 목록을 실제 목록으로 다시 받는다
+  if (keyChanged) { loadRegions(); loadCategories(); }
+  if (state.videos.length === 0 && !state.searched) renderFeed();
   if (!state.aiRunning && !state.aiReport && state.videos.length === 0) renderAiIdle();
 }
 

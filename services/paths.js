@@ -26,6 +26,8 @@ const paths = {
   channelCacheFile: path.join(dataDir, 'cache', 'channel-baselines.json'),
   // 이 PC의 YouTube API 일일 사용량(태평양 시간 기준)
   usageFile: path.join(dataDir, 'usage.json'),
+  // 국가 목록·국가별 카테고리(30일 보관)
+  metaCacheFile: path.join(dataDir, 'cache', 'meta.json'),
   // 이전 버전이 사용하던 %APPDATA% 설정 파일(읽기 전용 이관용)
   legacyConfigFile: () => path.join(app.getPath('appData'), 'Boks YouTube Finder', 'boks-youtube-finder-config.json')
 };

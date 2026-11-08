@@ -5,17 +5,48 @@
 
 const fs = require('fs');
 const path = require('path');
-const { safeStorage } = require('electron');
+const { safeStorage, app } = require('electron');
 const { paths, ensureDir } = require('./paths');
 
-const DEFAULTS = {
+// 문자열 설정(그대로 저장)
+const STRING_DEFAULTS = {
   youtubeApiKey: '',
   aiEngine: 'claude', // 'claude' | 'codex'
   claudeCliPath: '',
-  codexCliPath: ''
+  codexCliPath: '',
+  keyCheckedAt: '' // 마지막으로 키를 확인한 시각(ISO)
 };
 
-const ALLOWED_KEYS = Object.keys(DEFAULTS);
+// 형식이 정해진 설정: [기본값, 검증 함수(잘못된 값이면 undefined)]
+const oneOf = list => v => (list.includes(v) ? v : undefined);
+const intIn = (lo, hi) => v => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : undefined; };
+const TYPED = {
+  // 검색 기본값
+  region: ['KR', v => (typeof v === 'string' && /^[A-Z]{2}$/.test(v) ? v : undefined)],
+  language: ['ko', v => (typeof v === 'string' && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(v) ? v : undefined)],
+  langOnly: [true, v => (typeof v === 'boolean' ? v : undefined)],
+  defaultFormat: ['all', oneOf(['all', 'long', 'shorts'])],
+  defaultPeriod: ['7d', oneOf(['24h', '3d', '7d', '30d', '90d', '1y', 'all'])],
+  defaultOrder: ['viewCount', oneOf(['viewCount', 'relevance'])],
+  rememberLast: [true, v => (typeof v === 'boolean' ? v : undefined)],
+  // API 사용 한도(할당량을 증설받았으면 늘린다)
+  searchLimit: [100, intIn(1, 100000)],
+  unitLimit: [10000, intIn(100, 10000000)],
+  // 채널 평소 조회수 캐시 유지 시간
+  cacheTtlHours: [24, oneOf([6, 12, 24, 72, 168])]
+};
+
+const DEFAULTS = { ...STRING_DEFAULTS, ...Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d])) };
+const ALLOWED_KEYS = Object.keys(STRING_DEFAULTS);
+
+function applyTyped(target, source) {
+  for (const [k, [, check]] of Object.entries(TYPED)) {
+    if (source && k in source) {
+      const v = check(source[k]);
+      if (v !== undefined) target[k] = v;
+    }
+  }
+}
 
 function canEncrypt() {
   try {
@@ -50,6 +81,7 @@ function decodeStored(stored) {
   for (const k of ALLOWED_KEYS) {
     if (typeof stored[k] === 'string') cfg[k] = stored[k];
   }
+  applyTyped(cfg, stored);
   if (stored.youtubeApiKeyEnc) {
     try {
       cfg.youtubeApiKey = safeStorage.decryptString(Buffer.from(stored.youtubeApiKeyEnc, 'base64'));
@@ -78,6 +110,10 @@ let cache = null;
 
 function loadConfig() {
   if (cache) return { ...cache };
+  // safeStorage 는 app ready 이전에 복호화할 수 없다. 그때 읽은 값(키가 빈 값)을 캐시하면 앱이 끝날 때까지 키를 잃는다.
+  if (app && typeof app.isReady === 'function' && !app.isReady()) {
+    throw new Error('[Config] app ready 이전에는 설정을 읽을 수 없습니다.');
+  }
 
   let stored = readJson(paths.configFile);
   let needsRewrite = false;
@@ -103,10 +139,14 @@ function loadConfig() {
 function saveConfig(partial) {
   try {
     const next = { ...loadConfig() };
+    const keyBefore = next.youtubeApiKey;
     for (const k of ALLOWED_KEYS) {
       if (partial && typeof partial[k] === 'string') next[k] = partial[k].trim();
     }
+    applyTyped(next, partial);
     if (next.aiEngine !== 'codex') next.aiEngine = 'claude';
+    // 키가 바뀌었는데 확인 시각을 따로 주지 않았으면 이전 확인 기록은 무효
+    if (next.youtubeApiKey !== keyBefore && !(partial && typeof partial.keyCheckedAt === 'string')) next.keyCheckedAt = '';
     writeStored(encodeConfig(next));
     cache = next;
     if (next.youtubeApiKey) decryptFailed = false;
@@ -117,4 +157,9 @@ function saveConfig(partial) {
   }
 }
 
-module.exports = { loadConfig, saveConfig, canEncrypt, keyNeedsReentry: () => decryptFailed };
+/** 검색 기본값·한도·캐시 설정만 기본값으로 되돌린다(API 키·AI 설정은 유지) */
+function typedDefaults() {
+  return Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d]));
+}
+
+module.exports = { loadConfig, saveConfig, canEncrypt, keyNeedsReentry: () => decryptFailed, typedDefaults, DEFAULTS };

@@ -3,6 +3,7 @@
 // 이 PC에서 쓴 YouTube Data API 사용량을 할당량 초기화 기준(태평양 시간 자정)으로 센다.
 //   - search.list: 검색 할당량(기본 하루 100회)
 //   - 그 밖의 list 호출: 조회 유닛(기본 하루 10,000, 호출당 1)
+//   한도는 설정에서 바꿀 수 있다(할당량을 증설받은 경우). 검색 전에 남은 검색 수를 확인해 미리 막는다.
 // 같은 API 키를 다른 PC·앱에서도 쓰면 실제 사용량은 이보다 많을 수 있다.
 // ==========================================================================
 
@@ -17,7 +18,19 @@ function quotaDay(now = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
-function createUsageCounter(file, { now = () => new Date() } = {}) {
+// 다음 초기화 시각(태평양 시간 자정, ms). 서머타임 전환일도 맞도록 1분 단위로 날짜가 바뀌는 시점을 찾는다.
+function nextResetMs(now = new Date()) {
+  const today = quotaDay(now);
+  let lo = now.getTime();
+  let hi = lo + 26 * 3600 * 1000;
+  while (hi - lo > 60000) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (quotaDay(new Date(mid)) === today) lo = mid; else hi = mid;
+  }
+  return hi;
+}
+
+function createUsageCounter(file, { now = () => new Date(), limits = () => ({ search: SEARCH_LIMIT, units: UNIT_LIMIT }) } = {}) {
   let data = null;
 
   function load() {
@@ -53,9 +66,14 @@ function createUsageCounter(file, { now = () => new Date() } = {}) {
     flush: save,
     snapshot() {
       const d = load();
-      return { day: d.day, search: d.search, searchLimit: SEARCH_LIMIT, units: d.units, unitLimit: UNIT_LIMIT };
+      const l = limits();
+      return { day: d.day, search: d.search, searchLimit: l.search, units: d.units, unitLimit: l.units, resetAt: nextResetMs(now()) };
+    },
+    /** 오늘 남은 검색 수(설정 한도 기준, 0 미만이면 0) */
+    remainingSearch() {
+      return Math.max(0, limits().search - load().search);
     }
   };
 }
 
-module.exports = { createUsageCounter, quotaDay, SEARCH_LIMIT, UNIT_LIMIT };
+module.exports = { createUsageCounter, quotaDay, nextResetMs, SEARCH_LIMIT, UNIT_LIMIT };

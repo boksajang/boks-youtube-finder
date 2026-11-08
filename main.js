@@ -16,13 +16,24 @@ const { createChannelCache } = require('./services/channel-cache');
 const aiCliService = require('./services/ai-cli');
 const { computeTrends } = require('./services/trends');
 const { createUsageCounter } = require('./services/usage');
+const { createMetaCache } = require('./services/meta-cache');
+// 설정(암호화된 API 키 포함)은 app ready 이후에만 읽는다. safeStorage 는 그 전에 복호화할 수 없어
+// 미리 읽으면 키가 빈 값으로 캐시된다. 캐시 유지 시간은 ready 후 설정값으로 맞춘다.
 const channelCache = createChannelCache(paths.channelCacheFile);
-const usage = createUsageCounter(paths.usageFile);
+const metaCache = createMetaCache(paths.metaCacheFile);
+const usage = createUsageCounter(paths.usageFile, {
+  limits: () => { const c = configService.loadConfig(); return { search: c.searchLimit, units: c.unitLimit }; }
+});
 youtubeService.setUsageRecorder(endpoint => usage.record(endpoint));
 
 const FORMATS = ['all', 'long', 'shorts'];
+const PERIODS = ['24h', '3d', '7d', '30d', '90d', '1y', 'all', 'custom'];
 const safeFormat = f => (FORMATS.includes(f) ? f : 'all');
 const safeOrder = o => (o === 'relevance' ? 'relevance' : 'viewCount');
+const safePeriod = p => (PERIODS.includes(p) ? p : 'all');
+const safeRegion = r => (typeof r === 'string' && /^[A-Z]{2}$/.test(r) ? r : 'KR');
+const safeLang = l => (typeof l === 'string' && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(l) ? l : 'ko');
+const safeCategory = c => (/^\d{1,3}$/.test(String(c)) ? String(c) : '0');
 
 const isMac = process.platform === 'darwin';
 const ICON_PATH = path.join(__dirname, 'assets', isMac ? 'icon.png' : (process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
@@ -51,7 +62,7 @@ function createWindow() {
     frame: false,
     titleBarStyle: isMac ? 'hidden' : undefined,
     trafficLightPosition: isMac ? { x: 12, y: 11 } : undefined,
-    backgroundColor: '#0a1020',
+    backgroundColor: '#0f0f0f',
     icon: fs.existsSync(ICON_PATH) ? ICON_PATH : undefined,
     title: 'Boks YouTube Finder',
     webPreferences: {
@@ -93,6 +104,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   if (!gotLock) return;
+  channelCache.setTtl(configService.loadConfig().cacheTtlHours * 3600000);
   Menu.setApplicationMenu(null);
   createWindow();
   app.on('activate', () => {
@@ -129,27 +141,75 @@ ipcMain.handle('config:get', wrap(() => ({
 ipcMain.handle('config:save', wrap((cfg) => {
   const res = configService.saveConfig(cfg);
   if (!res.success) throw Object.assign(new Error(`설정을 저장하지 못했습니다: ${res.error}`), { code: 'CONFIG_SAVE' });
+  channelCache.setTtl(res.config.cacheTtlHours * 3600000);
   return res.config;
+}));
+ipcMain.handle('config:defaults', wrap(() => configService.typedDefaults()));
+
+// API 키 확인(1 유닛): 저장 전에 키가 실제로 동작하는지 본다
+ipcMain.handle('config:validate-key', wrap(async ({ key }) => {
+  try {
+    await youtubeService.validateApiKey(String(key || '').trim());
+    return { checkedAt: new Date().toISOString() };
+  } finally {
+    usage.flush();
+  }
+}));
+
+// 국가 목록·국가별 카테고리(30일 캐시, 키가 없거나 실패하면 기본 목록)
+ipcMain.handle('meta:regions', wrap(async () => {
+  const key = configService.loadConfig().youtubeApiKey;
+  try {
+    return await metaCache.regions(key ? () => youtubeService.fetchRegions(key) : null);
+  } finally {
+    usage.flush();
+  }
+}));
+ipcMain.handle('meta:categories', wrap(async ({ region }) => {
+  const key = configService.loadConfig().youtubeApiKey;
+  const r = safeRegion(region);
+  try {
+    return await metaCache.categories(r, key ? () => youtubeService.fetchCategories(key, r) : null);
+  } finally {
+    usage.flush();
+  }
+}));
+
+// 캐시 현황·비우기(채널 평소 조회수 + 국가·카테고리 목록)
+ipcMain.handle('cache:stats', wrap(() => channelCache.stats()));
+ipcMain.handle('cache:clear', wrap(() => {
+  channelCache.clear();
+  metaCache.clear();
+  return channelCache.stats();
 }));
 
 ipcMain.handle('cli:detect-path', wrap(({ engine }) => aiCliService.detectCliPath(engine === 'codex' ? 'codex' : 'claude')));
 
-ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, format, order }) => {
+// 키워드는 선택: 비우면 국가·주제·기간·형식 조건의 인기 영상 전체를 분석한다
+ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, customFrom, customTo, format, order, region, language, langOnly }) => {
   const q = String(query || '').trim().slice(0, 100);
-  if (!q) throw Object.assign(new Error('검색할 키워드를 입력해 주세요.'), { code: 'EMPTY_QUERY' });
   const config = configService.loadConfig();
+  const remaining = usage.remainingSearch();
+  if (config.youtubeApiKey && remaining <= 0) {
+    const s = usage.snapshot();
+    const at = new Date(s.resetAt).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' });
+    throw Object.assign(new Error(`오늘 검색 한도(${s.searchLimit}회)를 모두 썼습니다. 한국 시간 ${at}에 초기화됩니다. 할당량을 늘렸다면 [설정]에서 한도를 바꿔 주세요.`), { code: 'QUOTA_LOCAL' });
+  }
   try {
     const result = await youtubeService.searchYouTube({
       apiKey: config.youtubeApiKey,
       query: q,
       maxResults: 50,
-      regionCode: 'KR',
-      relevanceLanguage: 'ko',
-      videoCategoryId: String(videoCategoryId || '0'),
-      publishedPeriod: String(publishedPeriod || 'all'),
+      regionCode: safeRegion(region),
+      relevanceLanguage: safeLang(language),
+      langOnly: langOnly !== false,
+      videoCategoryId: safeCategory(videoCategoryId),
+      publishedPeriod: safePeriod(publishedPeriod),
+      customRange: { from: String(customFrom || ''), to: String(customTo || '') },
       format: safeFormat(format),
       order: safeOrder(order),
-      channelCache
+      channelCache,
+      maxSearchCalls: remaining
     });
     const analytics = youtubeService.computeMarketAnalytics(result.videos, q);
     const trends = computeTrends(result.videos, result.format);

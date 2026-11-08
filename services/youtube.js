@@ -20,10 +20,14 @@ const BASELINE_MIN_AGE_MS = 48 * 3600 * 1000; // 막 올라와 조회수가 쌓�
 const BASELINE_FLOOR = 1000;            // 평소 조회수가 아주 낮은 채널의 배수 과장을 막는 하한
 const BASELINE_CONCURRENCY = 8;
 
+// 영상에 붙는 카테고리 이름(카테고리 ID는 전 세계 공통). 검색 조건 목록은 국가별로 API에서 받아 온다.
 const CATEGORY_NAMES = {
-  '1': '영화/애니', '2': '자동차', '10': '음악', '15': '반려동물', '17': '스포츠',
-  '19': '여행/이벤트', '20': '게임', '22': '인물/블로그', '23': '코미디', '24': '엔터테인먼트',
-  '25': '뉴스/정치', '26': '노하우/스타일', '27': '교육', '28': '과학기술', '29': '비영리/사회운동'
+  '1': '영화/애니메이션', '2': '자동차', '10': '음악', '15': '반려동물/동물', '17': '스포츠',
+  '18': '단편 영화', '19': '여행/이벤트', '20': '게임', '21': '동영상 블로그', '22': '인물/블로그',
+  '23': '코미디', '24': '엔터테인먼트', '25': '뉴스/정치', '26': '노하우/스타일', '27': '교육',
+  '28': '과학기술', '29': '비영리/사회운동', '30': '영화', '31': '애니메이션', '32': '액션/모험',
+  '33': '고전', '34': '코미디', '35': '다큐멘터리', '36': '드라마', '37': '가족', '38': '외국',
+  '39': '공포', '40': '공상과학/판타지', '41': '스릴러', '42': '단편', '43': '프로그램', '44': '예고편'
 };
 
 class YouTubeApiError extends Error {
@@ -100,17 +104,26 @@ async function mapLimit(items, limit, fn) {
  * 키워드로 영상을 검색하고 채널 구독자·영상 통계를 합쳐 떡상 지표를 계산한다.
  * search.list 의 제목은 HTML 이스케이프되어 오므로 videos.list 의 원문 snippet 을 사용한다.
  */
-async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', videoCategoryId = '0', publishedPeriod = 'all', format = 'all', order = 'viewCount', channelCache = null }) {
+/**
+ * @param query            키워드. 비우면 조건(국가·주제·기간·형식)에 맞는 인기 영상 전체를 찾는다
+ * @param langOnly         선택한 언어(relevanceLanguage) 영상만 분석에 남길지
+ * @param customRange      publishedPeriod === 'custom' 일 때 { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' } (한국 시간 날짜)
+ * @param maxSearchCalls   이번 검색에서 쓸 수 있는 search.list 호출 수(남은 일일 한도). 1차 검색조차 못 하면 오류
+ */
+async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', langOnly = true, videoCategoryId = '0', publishedPeriod = 'all', customRange = null, format = 'all', order = 'viewCount', channelCache = null, maxSearchCalls = Infinity }) {
   if (!apiKey) {
     throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
+  query = String(query || '').trim();
 
-  const params = { part: 'snippet', q: query, type: 'video', maxResults: String(Math.min(50, Math.max(1, maxResults))) };
+  const params = { part: 'snippet', type: 'video', maxResults: String(Math.min(50, Math.max(1, maxResults))) };
+  if (query) params.q = query;
   if (regionCode && regionCode !== 'ALL') params.regionCode = regionCode;
   if (relevanceLanguage && relevanceLanguage !== 'ALL') params.relevanceLanguage = relevanceLanguage;
   if (videoCategoryId && videoCategoryId !== '0') params.videoCategoryId = videoCategoryId;
-  const publishedAfter = calculatePublishedAfter(publishedPeriod);
-  if (publishedAfter) params.publishedAfter = publishedAfter;
+  const range = calculatePublishedRange(publishedPeriod, customRange);
+  if (range.after) params.publishedAfter = range.after;
+  if (range.before) params.publishedBefore = range.before;
 
   // 형식은 검색 단계에서 나눈다. 한 번에 섞어 검색하면 쇼츠가 상위를 차지해 롱폼이 몇 개밖에 남지 않는다.
   //   short = 4분 미만, medium = 4~20분, long = 20분 초과 (search.list videoDuration)
@@ -150,8 +163,18 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
   }
 
   for (let round = 0; ; round++) {
-    const active = buckets.filter(b => b.steps.length > 0 && (round === 0 || b.kept < target));
+    let active = buckets.filter(b => b.steps.length > 0 && (round === 0 || b.kept < target));
     if (active.length === 0) break;
+    // 남은 일일 검색 한도 안에서만 검색한다
+    const budget = maxSearchCalls - searchCalls;
+    if (round === 0 && budget < active.length) {
+      throw new YouTubeApiError(`오늘 남은 검색 횟수(${Math.max(0, budget)}회)로는 이 조건을 검색할 수 없습니다(최소 ${active.length}회 필요). 형식을 롱폼·쇼츠로 좁히거나, 설정에서 하루 검색 한도를 확인해 주세요.`, 'QUOTA_BUDGET');
+    }
+    if (active.length > budget) {
+      active = active.slice(0, Math.max(0, budget));
+      topupStopped = true;
+      if (active.length === 0) break;
+    }
     let lists;
     try {
       lists = await Promise.all(active.map(runStep));
@@ -197,7 +220,7 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
       v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
       // 'short' 버킷에는 3~4분 롱폼도 섞여 온다 → 선택한 형식과 다르면 제외
       if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
-      const reason = relevanceIssue(v, query, relevanceLanguage);
+      const reason = relevanceIssue(v, query, relevanceLanguage, langOnly);
       if (reason) {
         excluded[reason]++;
         excludedItems.push({ id, reason, title: v.title, channelTitle: v.channelTitle, viewCount: v.viewCount });
@@ -239,7 +262,10 @@ async function searchYouTube({ apiKey, query, maxResults = 50, regionCode = 'KR'
     const base = chUploads ? computeChannelBaseline(chUploads.uploads, { videoId: id, isShorts, now: chUploads.asOf }) : null;
     const baselineRatio = base ? round1(viewCount / Math.max(base.median, BASELINE_FLOOR)) : null;
     const scoreBasis = baselineRatio !== null ? 'baseline' : subsRatio !== null ? 'subs' : null;
-    const score = baselineRatio !== null ? baselineRatio : subsRatio;
+    // 평소 조회수를 모를 때의 추정 배수에도 같은 하한(1,000)을 둔다.
+    // 구독자 1명 채널의 1만 회 영상이 "1만 배"로 맨 위에 오는 것을 막는다(표시용 구독자 대비 배수는 원값 유지).
+    const subsScore = subsRatio !== null ? round1(viewCount / Math.max(subscriberCount, BASELINE_FLOOR)) : null;
+    const score = baselineRatio !== null ? baselineRatio : subsScore;
 
     videos.push({
       id,
@@ -311,8 +337,57 @@ function compact(s) {
   return String(s || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-/** @returns {null|'spam'|'language'|'offtopic'} */
-function relevanceIssue(v, query, relevanceLanguage = 'ko') {
+// 언어별 문자 판정. 라틴 문자 언어(영어·스페인어 등)끼리는 글자로 구분할 수 없어 '라틴 문자 위주인지'만 본다.
+const SCRIPT_RE = {
+  hangul: HANGUL_RE,
+  kana: /[\p{Script=Hiragana}\p{Script=Katakana}]/gu,
+  han: /\p{Script=Han}/gu,
+  thai: /\p{Script=Thai}/gu,
+  devanagari: /\p{Script=Devanagari}/gu,
+  cyrillic: /\p{Script=Cyrillic}/gu,
+  arabic: /\p{Script=Arabic}/gu,
+  latin: /\p{Script=Latin}/gu
+};
+const scriptCount = (s, key) => (String(s || '').match(SCRIPT_RE[key]) || []).length;
+const LANG_SCRIPT = { ko: 'hangul', ja: 'kana', zh: 'han', th: 'thai', hi: 'devanagari', ru: 'cyrillic', ar: 'arabic' };
+
+/**
+ * 선택한 언어의 영상이 아니면 true.
+ * 1) 영상의 음성·기본 언어가 선택 언어와 같으면 통과
+ * 2) 제목(해시태그 제외)·채널명과 설명 앞부분에 그 언어의 글자가 거의 없으면 다른 언어
+ */
+function languageMismatch(v, lang, core, channelTitle, description) {
+  const base = String(lang || '').split('-')[0].toLowerCase();
+  if (!base) return false;
+  const declared = String(v.defaultAudioLanguage || v.defaultLanguage || '').split('-')[0].toLowerCase();
+  if (declared && declared === base) return false;
+  const head = core + ' ' + channelTitle;
+  const desc = stripHashtags(description.slice(0, 400));
+  const tags = (v.tags || []).join(' ');
+  const script = LANG_SCRIPT[base];
+  if (script) {
+    // 태그에 그 언어 글자가 충분하면 같은 언어로 본다(제목·채널명이 영어인 K-pop 뮤직비디오 등)
+    if (scriptCount(tags, script) >= 4) return false;
+    // 중국어는 한자가 있어도 가나가 섞이면 일본어로 본다
+    if (base === 'zh' && scriptCount(head, 'kana') >= 2) return true;
+    // 일본어 제목은 한자만으로 이뤄지기도 한다(예: 首相会見 速報). 가나가 한 글자라도 있거나,
+    // 설명이 비어 판단할 근거가 없을 때 한자 제목이면 통과
+    if (base === 'ja') {
+      if (scriptCount(head, 'kana') >= 1 || scriptCount(desc, 'kana') >= 10) return false;
+      return !(scriptCount(head, 'han') >= 2 && scriptCount(head, 'hangul') === 0 && !desc.trim());
+    }
+    return scriptCount(head, script) < 2 && scriptCount(desc, script) < 10;
+  }
+  // 라틴 문자 언어: 제목·채널명과 설명 모두 라틴 문자보다 다른 문자가 많으면 다른 언어
+  const nonLatin = s => ['hangul', 'kana', 'han', 'thai', 'devanagari', 'cyrillic', 'arabic'].reduce((n, k) => n + scriptCount(s, k), 0);
+  return nonLatin(head) > scriptCount(head, 'latin') && nonLatin(desc) >= scriptCount(desc, 'latin');
+}
+
+/**
+ * @param langOnly 선택한 언어 영상만 남길지(기본 true)
+ * @returns {null|'spam'|'language'|'offtopic'}
+ */
+function relevanceIssue(v, query, relevanceLanguage = 'ko', langOnly = true) {
   // 분해형(NFD) 한글도 같은 글자로 보도록 먼저 정규화
   const title = String(v.title || '').normalize('NFC');
   const channelTitle = String(v.channelTitle || '').normalize('NFC');
@@ -320,27 +395,25 @@ function relevanceIssue(v, query, relevanceLanguage = 'ko') {
   query = String(query || '').normalize('NFC');
   const q = compact(query);
   const words = query.split(/\s+/).map(compact).filter(w => w.length > 0);
-  const koQuery = relevanceLanguage === 'ko' && hangulCount(query) > 0;
+  const base = String(relevanceLanguage || '').split('-')[0].toLowerCase();
   const titleC = compact(title); // 해시태그 글자 포함
-  const titleHasQuery = q && (titleC.includes(q) || words.some(w => w.length >= 2 && titleC.includes(w)));
+  // 키워드 없이 찾은 경우(인기 영상 탐색)는 제목에 키워드가 있는 것으로 본다
+  const titleHasQuery = !q || titleC.includes(q) || words.some(w => w.length >= 2 && titleC.includes(w));
 
   // #shorts·#쇼츠 같은 형식 표시 해시태그는 도배로 세지 않는다
   const tagsInTitle = (title.match(HASHTAG_RE) || []).filter(t => !/^#(shorts?|쇼츠|숏츠)$/i.test(t));
   const core = stripHashtags(title);
   const coreLetters = (core.match(/[\p{L}\p{N}]/gu) || []).length;
-  const head = hangulCount(core + ' ' + channelTitle);
   // 1) 해시태그 도배: 제목에 해시태그 5개 이상, 또는 해시태그를 빼면 글자가 거의 없는 제목.
-  //    단 한국어 검색에서 한글 본문 제목 뒤에 키워드 해시태그를 붙인 영상(예: "초간단 크림당면 #자취요리 #먹방 …")은
-  //    한국 쇼츠의 흔한 제목 형식이므로 정상 영상으로 본다. 해시태그만 있는 제목은 그대로 도배로 본다.
+  //    단 본문 제목 뒤에 키워드 해시태그를 붙인 영상(예: "초간단 크림당면 #자취요리 #먹방 …")은
+  //    쇼츠의 흔한 제목 형식이므로 정상 영상으로 본다. 해시태그만 있는 제목은 그대로 도배로 본다.
   if (coreLetters < 3 && tagsInTitle.length >= 2) return 'spam';
-  if (tagsInTitle.length >= 5 && !(koQuery && hangulCount(core) >= 2 && titleHasQuery)) return 'spam';
+  const coreOk = base === 'ko' ? hangulCount(core) >= 2 : coreLetters >= 6;
+  if (tagsInTitle.length >= 5 && !(coreOk && titleHasQuery)) return 'spam';
 
-  // 2) 언어: 한국어 키워드로 찾았는데 제목(해시태그 제외)·채널명에 한글이 없고
-  //    설명 앞부분에도 한글 문장이 없으면 해외 영상(설명에 키워드만 끼워 넣은 경우 포함)
-  if (koQuery) {
-    const desc = hangulCount(stripHashtags(description.slice(0, 400)));
-    if (head < 2 && desc < 10) return 'language';
-  }
+  // 2) 언어: 선택한 언어 영상만 볼 때, 제목(해시태그 제외)·채널명·설명 앞부분에 그 언어 글자가 거의 없으면
+  //    해외·다른 언어 영상(설명에 키워드만 끼워 넣은 경우 포함)
+  if (langOnly && languageMismatch(v, relevanceLanguage, core, channelTitle, description)) return 'language';
 
   // 3) 키워드: 제목·태그·설명·채널명 어디에도 키워드(띄어쓰기 무시)가 없으면 무관한 영상.
   //    여러 단어 키워드는 단어 하나 이상이 제목에 있고 절반 이상이 어딘가에 있으면 관련 영상으로 본다.
@@ -483,6 +556,8 @@ async function fetchVideoDetails(videoIds, apiKey) {
         thumbnails: s.thumbnails || {},
         liveBroadcastContent: s.liveBroadcastContent || 'none',
         tags: Array.isArray(s.tags) ? s.tags : [],
+        defaultAudioLanguage: s.defaultAudioLanguage || '',
+        defaultLanguage: s.defaultLanguage || '',
         durationSec: parseIsoDuration(v.contentDetails && v.contentDetails.duration),
         viewCount: toInt(v.statistics && v.statistics.viewCount),
         likeCount: toInt(v.statistics && v.statistics.likeCount),
@@ -672,10 +747,62 @@ function extractTitleKeywords(videos, query = '') {
 
 // --- Utilities ---
 
-function calculatePublishedAfter(period) {
-  const DAY = 86400000;
-  const spans = { '24h': 1, '7d': 7, '30d': 30, '90d': 90, '1y': 365 };
-  return spans[period] ? new Date(Date.now() - spans[period] * DAY).toISOString() : null;
+const PERIOD_DAYS = { '24h': 1, '3d': 3, '7d': 7, '30d': 30, '90d': 90, '1y': 365 };
+const KST_OFFSET_MS = 9 * 3600 * 1000;
+
+/** 'YYYY-MM-DD'(한국 시간 날짜) → 그 날 0시의 UTC ms. 형식이 틀리면 null */
+function kstDateStart(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(str || ''));
+  if (!m) return null;
+  const t = Date.UTC(+m[1], +m[2] - 1, +m[3]) - KST_OFFSET_MS;
+  const back = new Date(t + KST_OFFSET_MS);
+  return back.getUTCFullYear() === +m[1] && back.getUTCMonth() === +m[2] - 1 && back.getUTCDate() === +m[3] ? t : null;
+}
+
+/**
+ * 업로드 기간 → search.list publishedAfter/Before.
+ * custom: 시작일 0시 ~ 종료일 다음날 0시(한국 시간). 종료일이 미래면 지금까지.
+ */
+function calculatePublishedRange(period, customRange = null, now = Date.now()) {
+  if (period === 'custom') {
+    const from = kstDateStart(customRange && customRange.from);
+    const toStart = kstDateStart(customRange && customRange.to);
+    if (from === null || toStart === null || from > toStart) {
+      throw new YouTubeApiError('직접 지정한 기간이 올바르지 않습니다. 시작일과 종료일을 다시 확인해 주세요.', 'BAD_RANGE');
+    }
+    if (from > now) throw new YouTubeApiError('시작일이 오늘보다 늦습니다. 기간을 다시 지정해 주세요.', 'BAD_RANGE');
+    const before = Math.min(toStart + 86400000, now);
+    return { after: new Date(from).toISOString(), before: new Date(before).toISOString() };
+  }
+  return PERIOD_DAYS[period] ? { after: new Date(now - PERIOD_DAYS[period] * 86400000).toISOString(), before: null } : { after: null, before: null };
+}
+
+// --- 메타데이터(국가·카테고리) ---
+
+/** 국가 목록(i18nRegions, 한국어 이름). 1 유닛 */
+async function fetchRegions(apiKey) {
+  const data = await apiGet('i18nRegions', { part: 'snippet', hl: 'ko' }, apiKey);
+  return (data.items || [])
+    .map(it => ({ id: it.snippet && it.snippet.gl, name: it.snippet && it.snippet.name }))
+    .filter(r => r.id && r.name)
+    .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+}
+
+/** 국가에서 쓸 수 있는 영상 카테고리(한국어 이름). 1 유닛 */
+async function fetchCategories(apiKey, regionCode = 'KR') {
+  const data = await apiGet('videoCategories', { part: 'snippet', regionCode, hl: 'ko' }, apiKey);
+  return (data.items || [])
+    .filter(it => it.snippet && it.snippet.assignable)
+    .map(it => ({ id: it.id, name: it.snippet.title }));
+}
+
+/** API 키 확인(1 유닛). 실패하면 원인별 YouTubeApiError */
+async function validateApiKey(apiKey) {
+  if (!/^AIza[0-9A-Za-z_-]{35}$/.test(String(apiKey || ''))) {
+    throw new YouTubeApiError('API 키 형식이 아닙니다. AIza로 시작하는 39자리인지 확인해 주세요.', 'KEY_FORMAT');
+  }
+  await apiGet('videoCategories', { part: 'id', regionCode: 'KR' }, apiKey);
+  return true;
 }
 
 function chunkArray(array, size) {
@@ -748,6 +875,10 @@ module.exports = {
   setUsageRecorder,
   computeMarketAnalytics,
   extractTitleKeywords,
+  fetchRegions,
+  fetchCategories,
+  validateApiKey,
+  CATEGORY_NAMES,
   // 테스트용
-  _internal: { relevanceIssue, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
+  _internal: { relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
 };
