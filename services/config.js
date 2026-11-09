@@ -33,7 +33,9 @@ const TYPED = {
   searchLimit: [100, intIn(1, 100000)],
   unitLimit: [10000, intIn(100, 10000000)],
   // 채널 평소 조회수 캐시 유지 시간
-  cacheTtlHours: [24, oneOf([6, 12, 24, 72, 168])]
+  cacheTtlHours: [24, oneOf([6, 12, 24, 72, 168])],
+  // 같은 조건 검색 결과를 다시 쓰는 시간(분, 0 = 쓰지 않음). 다시 쓰면 할당량이 들지 않는다
+  resultCacheMinutes: [60, oneOf([0, 30, 60, 180, 360])]
 };
 
 const DEFAULTS = { ...STRING_DEFAULTS, ...Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d])) };
@@ -56,13 +58,25 @@ function canEncrypt() {
   }
 }
 
+/** @returns {{ data: object|null, corrupt: boolean }} 파일이 없으면 data=null·corrupt=false */
 function readJson(file) {
   try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!fs.existsSync(file)) return { data: null, corrupt: false };
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return data && typeof data === 'object' && !Array.isArray(data) ? { data, corrupt: false } : { data: null, corrupt: true };
   } catch (err) {
     console.error('[Config] 설정 파일을 읽지 못했습니다:', file, err.message);
+    return { data: null, corrupt: true };
   }
-  return null;
+}
+
+// 손상된 설정 파일은 지우지 않고 옆에 보관한다(다음 저장 때 덮어써 원본을 잃지 않도록)
+function backupCorrupt(file) {
+  try {
+    fs.copyFileSync(file, `${file}.corrupt-${Date.now()}`);
+  } catch (err) {
+    console.error('[Config] 손상된 설정 백업 실패:', err.message);
+  }
 }
 
 function writeStored(stored) {
@@ -73,10 +87,14 @@ function writeStored(stored) {
 }
 
 let decryptFailed = false;
+// 복호화하지 못한 암호문. 키를 새로 넣기 전까지 보관해, 다른 설정을 저장해도 디스크의 키가 지워지지 않게 한다
+// (Linux 키링이 잠겨 있는 등 일시적인 실패라면 다음 실행에서 다시 풀 수 있다)
+let pendingEnc = '';
 
 // 디스크 형식 → 메모리 형식
 function decodeStored(stored) {
   decryptFailed = false;
+  pendingEnc = '';
   const cfg = { ...DEFAULTS };
   for (const k of ALLOWED_KEYS) {
     if (typeof stored[k] === 'string') cfg[k] = stored[k];
@@ -90,6 +108,7 @@ function decodeStored(stored) {
       console.error('[Config] API 키 복호화 실패:', err.message);
       cfg.youtubeApiKey = '';
       decryptFailed = true;
+      pendingEnc = String(stored.youtubeApiKeyEnc);
     }
   }
   if (cfg.aiEngine !== 'codex') cfg.aiEngine = 'claude';
@@ -102,6 +121,8 @@ function encodeConfig(cfg) {
   if (cfg.youtubeApiKey && canEncrypt()) {
     stored.youtubeApiKeyEnc = safeStorage.encryptString(cfg.youtubeApiKey).toString('base64');
     delete stored.youtubeApiKey;
+  } else if (!cfg.youtubeApiKey && decryptFailed && pendingEnc) {
+    stored.youtubeApiKeyEnc = pendingEnc;
   }
   return stored;
 }
@@ -115,12 +136,15 @@ function loadConfig() {
     throw new Error('[Config] app ready 이전에는 설정을 읽을 수 없습니다.');
   }
 
-  let stored = readJson(paths.configFile);
+  const current = readJson(paths.configFile);
+  let stored = current.data;
   let needsRewrite = false;
+  // 손상된 파일은 보관한 뒤 기본값으로 다시 써 둔다(켤 때마다 백업이 늘지 않도록)
+  if (current.corrupt) { backupCorrupt(paths.configFile); needsRewrite = true; }
 
-  if (!stored) {
-    // 이전 버전(%APPDATA%)의 설정을 1회 가져온다. 원본 파일은 건드리지 않는다.
-    const legacy = readJson(paths.legacyConfigFile());
+  // 파일이 아예 없을 때만 이전 버전(%APPDATA%)의 설정을 1회 가져온다(손상된 경우 예전 키로 덮어쓰지 않음). 원본 파일은 건드리지 않는다.
+  if (!stored && !current.corrupt) {
+    const legacy = readJson(paths.legacyConfigFile()).data;
     if (legacy) {
       stored = legacy;
       needsRewrite = true;
@@ -149,7 +173,7 @@ function saveConfig(partial) {
     if (next.youtubeApiKey !== keyBefore && !(partial && typeof partial.keyCheckedAt === 'string')) next.keyCheckedAt = '';
     writeStored(encodeConfig(next));
     cache = next;
-    if (next.youtubeApiKey) decryptFailed = false;
+    if (next.youtubeApiKey) { decryptFailed = false; pendingEnc = ''; }
     return { success: true, config: { ...next } };
   } catch (err) {
     console.error('[Config] 설정 저장 실패:', err);

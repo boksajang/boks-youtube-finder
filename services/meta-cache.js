@@ -9,6 +9,8 @@ const fs = require('fs');
 const path = require('path');
 
 const TTL_MS = 30 * 86400000;
+// API 실패 후 이 시간 동안은 다시 부르지 않고 기본 목록·만료 캐시를 쓴다(키 오류·한도 초과 때 매번 1 유닛씩 쓰지 않도록)
+const RETRY_AFTER_MS = 10 * 60000;
 
 // 키가 없거나 API 오류일 때 쓰는 기본 목록
 const FALLBACK_REGIONS = [
@@ -26,6 +28,8 @@ const FALLBACK_CATEGORIES = [
 
 function createMetaCache(file, { now = () => Date.now() } = {}) {
   let store = null;
+  const failedAt = new Map(); // slot:key → 마지막 실패 시각(메모리에만)
+  const inflight = new Map(); // 같은 목록을 동시에 요청하면 한 번만 부른다
 
   function load() {
     if (store) return store;
@@ -57,20 +61,32 @@ function createMetaCache(file, { now = () => Date.now() } = {}) {
    * @param fetcher API 호출 함수(키가 없으면 null)
    * @returns {{ items, source: 'cache'|'api'|'fallback', error? }}
    */
-  async function get(slot, key, fetcher, fallback) {
+  function get(slot, key, fetcher, fallback) {
+    const id = `${slot}:${key || ''}`;
+    if (inflight.has(id)) return inflight.get(id);
+    const p = resolve(slot, key, fetcher, fallback, id).finally(() => inflight.delete(id));
+    inflight.set(id, p);
+    return p;
+  }
+
+  async function resolve(slot, key, fetcher, fallback, id) {
     const s = load();
     const entry = key ? s[slot][key] : s[slot];
     if (fresh(entry)) return { items: entry.d, source: 'cache' };
-    if (fetcher) {
+    const recentFail = failedAt.has(id) && now() - failedAt.get(id) < RETRY_AFTER_MS;
+    if (fetcher && !recentFail) {
       try {
         const d = await fetcher();
         if (Array.isArray(d) && d.length) {
           const e = { t: now(), d };
           if (key) s[slot][key] = e; else s[slot] = e;
+          failedAt.delete(id);
           save();
           return { items: d, source: 'api' };
         }
+        failedAt.set(id, now()); // 빈 목록도 잠시 다시 부르지 않는다
       } catch (err) {
+        failedAt.set(id, now());
         // 만료된 캐시라도 있으면 그걸 쓴다
         if (entry && Array.isArray(entry.d) && entry.d.length) return { items: entry.d, source: 'cache', error: err.message };
         return { items: fallback, source: 'fallback', error: err.message };
@@ -83,8 +99,11 @@ function createMetaCache(file, { now = () => Date.now() } = {}) {
   return {
     regions: fetcher => get('regions', null, fetcher, FALLBACK_REGIONS),
     categories: (region, fetcher) => get('categories', region, fetcher, FALLBACK_CATEGORIES),
+    /** 키를 바꿨을 때 등: 실패 기록만 지워 바로 다시 받을 수 있게 한다 */
+    resetFailures() { failedAt.clear(); },
     clear() {
       store = { regions: null, categories: {} };
+      failedAt.clear();
       try { fs.rmSync(file, { force: true }); } catch { /* 무시 */ }
     }
   };

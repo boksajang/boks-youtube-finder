@@ -19,6 +19,7 @@ const BASELINE_SAMPLE_MIN = 5;          // 이보다 적으면 구독자 대비 
 const BASELINE_MIN_AGE_MS = 48 * 3600 * 1000; // 막 올라와 조회수가 쌓이는 중인 영상 제외
 const BASELINE_FLOOR = 1000;            // 평소 조회수가 아주 낮은 채널의 배수 과장을 막는 하한
 const BASELINE_CONCURRENCY = 8;
+const AUTO_TOPIC_RE = /\s-\sTopic$/; // YouTube 자동 생성 음악 채널
 
 // 영상에 붙는 카테고리 이름(카테고리 ID는 전 세계 공통). 검색 조건 목록은 국가별로 API에서 받아 온다.
 const CATEGORY_NAMES = {
@@ -54,6 +55,12 @@ function explainApiError(status, body) {
   if (reason === 'accessNotConfigured' || /has not been used|is disabled/i.test(raw)) {
     return new YouTubeApiError('Google Cloud 프로젝트에서 "YouTube Data API v3"가 사용 설정되지 않았습니다. 콘솔에서 사용 설정 후 다시 시도해 주세요.', 'API_DISABLED', raw);
   }
+  if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') {
+    return new YouTubeApiError('짧은 시간에 요청이 너무 많아 YouTube가 잠시 막았습니다. 1~2분 뒤 다시 시도해 주세요.', 'RATE_LIMIT', raw);
+  }
+  if (reason === 'videoChartNotFound') {
+    return new YouTubeApiError('이 국가에서는 선택한 주제의 인기 차트를 제공하지 않습니다. 다른 주제를 고르거나 키워드로 검색해 주세요.', 'CHART_NOT_FOUND', raw);
+  }
   if (reason === 'ipRefererBlocked' || reason === 'forbidden' || status === 403) {
     return new YouTubeApiError('API 키 사용 제한(IP·리퍼러·API 제한) 때문에 요청이 거부되었습니다. 키의 애플리케이션 제한을 확인해 주세요.', 'FORBIDDEN', raw);
   }
@@ -67,7 +74,7 @@ function setUsageRecorder(fn) {
 }
 
 async function apiGet(endpoint, params, apiKey) {
-  if (usageRecorder) usageRecorder(endpoint);
+  if (usageRecorder) usageRecorder(endpoint, apiKey);
   const qs = new URLSearchParams({ ...params, key: apiKey });
   let res;
   try {
@@ -76,11 +83,23 @@ async function apiGet(endpoint, params, apiKey) {
     if (err.name === 'TimeoutError') throw new YouTubeApiError('YouTube 서버 응답이 15초 안에 오지 않았습니다. 잠시 후 다시 시도해 주세요.', 'TIMEOUT');
     throw new YouTubeApiError('YouTube 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.', 'NETWORK', err.message);
   }
-  const body = await res.json().catch(() => ({}));
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (err) {
+    // 본문 수신 중 타임아웃, 또는 프록시·공용 와이파이 로그인 화면처럼 JSON 이 아닌 응답
+    if (res.ok) {
+      if (err && err.name === 'TimeoutError') throw new YouTubeApiError('YouTube 서버 응답이 15초 안에 끝나지 않았습니다. 잠시 후 다시 시도해 주세요.', 'TIMEOUT');
+      throw new YouTubeApiError('YouTube 서버에서 올바르지 않은 응답을 받았습니다. 인터넷 연결(프록시·공용 와이파이 로그인 등)을 확인해 주세요.', 'BAD_RESPONSE', err && err.message);
+    }
+  }
   if (!res.ok) {
-    const err = explainApiError(res.status, body);
+    const err = explainApiError(res.status, body || {});
     err.status = res.status;
     throw err;
+  }
+  if (!body || typeof body !== 'object') {
+    throw new YouTubeApiError('YouTube 서버에서 올바르지 않은 응답을 받았습니다. 잠시 후 다시 시도해 주세요.', 'BAD_RESPONSE');
   }
   return body;
 }
@@ -232,13 +251,89 @@ async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode =
     }
   }
 
-  const searchInfo = { calls: searchCalls, order: primary, topupStopped };
+  const searchInfo = { calls: searchCalls, order: primary, topupStopped, source: 'search' };
   if (kept.length === 0) return { videos: [], excluded, excludedItems, baseline: emptyBaselineStats(), format: fmt, searchCalls, searchInfo };
 
+  const { videos, baseline } = await buildVideos(kept, videoMap, apiKey, channelCache);
+  return { videos, excluded, excludedItems, baseline, format: fmt, searchCalls, searchInfo };
+}
+
+// 인기 차트(videos.list chart=mostPopular): 국가·주제별 YouTube 인기 영상. search.list 를 쓰지 않아 검색 한도가 들지 않는다(페이지당 1 유닛).
+const CHART_PAGES = 2; // 최대 100개
+
+/**
+ * 국가·주제별 인기 차트를 받아 검색과 같은 방식(형식·언어 거르기, 채널 평소 대비 배수)으로 분석한다.
+ * 차트는 '지금 인기' 목록이라 기간 조건이 없다.
+ */
+async function fetchPopularChart({ apiKey, regionCode = 'KR', videoCategoryId = '0', format = 'all', relevanceLanguage = 'ko', langOnly = true, channelCache = null, maxPages = CHART_PAGES }) {
+  if (!apiKey) {
+    throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
+  }
+  const fmt = SEARCH_PLAN[format] ? format : 'all';
+  const params = { part: 'snippet,contentDetails,statistics', chart: 'mostPopular', maxResults: '50' };
+  if (regionCode && regionCode !== 'ALL') params.regionCode = regionCode;
+  if (videoCategoryId && videoCategoryId !== '0') params.videoCategoryId = videoCategoryId;
+
+  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
+  const excludedItems = [];
+  const kept = [];
+  const videoMap = {};
+  let pageToken = '';
+  let pages = 0;
+  let stopped = false;
+  for (; pages < Math.max(1, maxPages); ) {
+    let data;
+    try {
+      data = await apiGet('videos', pageToken ? { ...params, pageToken } : params, apiKey);
+    } catch (err) {
+      if (pages === 0) throw err;
+      stopped = true; // 다음 페이지 실패는 받은 만큼으로 계속
+      break;
+    }
+    pages++;
+    for (const item of data.items || []) {
+      if (!item || !item.id || videoMap[item.id]) continue;
+      const v = mapVideoItem(item);
+      if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') { excluded.live++; continue; }
+      v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
+      if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
+      const reason = relevanceIssue(v, '', relevanceLanguage, langOnly);
+      if (reason) {
+        excluded[reason]++;
+        excludedItems.push({ id: item.id, reason, title: v.title, channelTitle: v.channelTitle, viewCount: v.viewCount });
+        continue;
+      }
+      videoMap[item.id] = v;
+      kept.push(item.id);
+    }
+    pageToken = data.nextPageToken || '';
+    if (!pageToken) break;
+  }
+
+  const searchInfo = { calls: 0, order: 'chart', topupStopped: stopped, source: 'chart', chartPages: pages };
+  if (kept.length === 0) return { videos: [], excluded, excludedItems, baseline: emptyBaselineStats(), format: fmt, searchCalls: 0, searchInfo };
+  const { videos, baseline } = await buildVideos(kept, videoMap, apiKey, channelCache);
+  return { videos, excluded, excludedItems, baseline, format: fmt, searchCalls: 0, searchInfo };
+}
+
+/** 거르기를 통과한 영상에 채널 구독자·평소 조회수를 붙여 떡상 지표를 계산한다(검색·인기 차트 공통) */
+async function buildVideos(kept, videoMap, apiKey, channelCache) {
   const channelIds = [...new Set(kept.map(id => videoMap[id].channelId).filter(Boolean))];
-  const channelMap = await fetchChannelDetails(channelIds, apiKey);
+  // 채널 정보 조회가 실패해도(할당량·네트워크) 이미 쓴 검색 결과를 버리지 않는다 → 구독자·평소 조회수 없이 표시
+  let channelMap = {};
+  let channelError = null;
+  try {
+    channelMap = await fetchChannelDetails(channelIds, apiKey);
+  } catch (err) {
+    channelError = err;
+    console.warn(`[youtube] 채널 정보 조회 실패: ${err.code} ${err.detail || err.message}`);
+  }
   // 채널 평소 조회수 수집은 실패해도 검색 전체를 실패시키지 않는다(구독자 대비로 대신)
   const { uploadsByChannel, stats: baseline } = await fetchChannelUploads(channelMap, apiKey, channelCache);
+  if (channelError) {
+    baseline.channelFailed = true;
+    if (channelError.code === 'QUOTA_EXCEEDED') baseline.quotaHit = true;
+  }
 
   const now = Date.now();
   const videos = [];
@@ -261,11 +356,14 @@ async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode =
     const chUploads = uploadsByChannel[v.channelId];
     const base = chUploads ? computeChannelBaseline(chUploads.uploads, { videoId: id, isShorts, now: chUploads.asOf }) : null;
     const baselineRatio = base ? round1(viewCount / Math.max(base.median, BASELINE_FLOOR)) : null;
-    const scoreBasis = baselineRatio !== null ? 'baseline' : subsRatio !== null ? 'subs' : null;
     // 평소 조회수를 모를 때의 추정 배수에도 같은 하한(1,000)을 둔다.
     // 구독자 1명 채널의 1만 회 영상이 "1만 배"로 맨 위에 오는 것을 막는다(표시용 구독자 대비 배수는 원값 유지).
-    const subsScore = subsRatio !== null ? round1(viewCount / Math.max(subscriberCount, BASELINE_FLOOR)) : null;
+    // YouTube 가 자동으로 만든 음악 채널("가수 - Topic")은 구독자 수가 곡 인기와 무관해 구독자 대비 추정을 하지 않는다
+    // (인기 차트에서 "구독자 2천 명 채널의 440만 회 = 1,857배"처럼 맨 위를 차지하는 것 방지)
+    const autoChannel = AUTO_TOPIC_RE.test(v.channelTitle || '');
+    const subsScore = subsRatio !== null && !autoChannel ? round1(viewCount / Math.max(subscriberCount, BASELINE_FLOOR)) : null;
     const score = baselineRatio !== null ? baselineRatio : subsScore;
+    const scoreBasis = baselineRatio !== null ? 'baseline' : subsScore !== null ? 'subs' : null;
 
     videos.push({
       id,
@@ -308,7 +406,7 @@ async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode =
     });
   }
 
-  return { videos, excluded, excludedItems, baseline, format: fmt, searchCalls, searchInfo };
+  return { videos, baseline };
 }
 
 // 보충 검색 기준: 버킷별 분석 대상이 이 수보다 적으면 다음 단계 검색을 더 한다
@@ -544,28 +642,31 @@ async function fetchVideoDetails(videoIds, apiKey) {
   const result = {};
   for (const chunk of chunkArray(videoIds, 50)) {
     const data = await apiGet('videos', { part: 'snippet,contentDetails,statistics', id: chunk.join(',') }, apiKey);
-    for (const v of data.items || []) {
-      const s = v.snippet || {};
-      result[v.id] = {
-        title: s.title || '',
-        description: s.description || '',
-        channelId: s.channelId || '',
-        channelTitle: s.channelTitle || '',
-        categoryId: s.categoryId || '0',
-        publishedAt: s.publishedAt,
-        thumbnails: s.thumbnails || {},
-        liveBroadcastContent: s.liveBroadcastContent || 'none',
-        tags: Array.isArray(s.tags) ? s.tags : [],
-        defaultAudioLanguage: s.defaultAudioLanguage || '',
-        defaultLanguage: s.defaultLanguage || '',
-        durationSec: parseIsoDuration(v.contentDetails && v.contentDetails.duration),
-        viewCount: toInt(v.statistics && v.statistics.viewCount),
-        likeCount: toInt(v.statistics && v.statistics.likeCount),
-        commentCount: toInt(v.statistics && v.statistics.commentCount)
-      };
-    }
+    for (const v of data.items || []) result[v.id] = mapVideoItem(v);
   }
   return result;
+}
+
+/** videos.list 항목 → 내부 영상 형식 */
+function mapVideoItem(v) {
+  const s = v.snippet || {};
+  return {
+    title: s.title || '',
+    description: s.description || '',
+    channelId: s.channelId || '',
+    channelTitle: s.channelTitle || '',
+    categoryId: s.categoryId || '0',
+    publishedAt: s.publishedAt,
+    thumbnails: s.thumbnails || {},
+    liveBroadcastContent: s.liveBroadcastContent || 'none',
+    tags: Array.isArray(s.tags) ? s.tags : [],
+    defaultAudioLanguage: s.defaultAudioLanguage || '',
+    defaultLanguage: s.defaultLanguage || '',
+    durationSec: parseIsoDuration(v.contentDetails && v.contentDetails.duration),
+    viewCount: toInt(v.statistics && v.statistics.viewCount),
+    likeCount: toInt(v.statistics && v.statistics.likeCount),
+    commentCount: toInt(v.statistics && v.statistics.commentCount)
+  };
 }
 
 async function fetchChannelDetails(channelIds, apiKey) {
@@ -872,6 +973,7 @@ function formatRelativeTime(date, now = Date.now()) {
 
 module.exports = {
   searchYouTube,
+  fetchPopularChart,
   setUsageRecorder,
   computeMarketAnalytics,
   extractTitleKeywords,
@@ -880,5 +982,5 @@ module.exports = {
   validateApiKey,
   CATEGORY_NAMES,
   // 테스트용
-  _internal: { relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit }
+  _internal: { relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit, mapVideoItem, buildVideos, apiGet }
 };

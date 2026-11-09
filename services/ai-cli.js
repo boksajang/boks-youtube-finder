@@ -318,7 +318,23 @@ function cancel() {
   if (!currentJob) return false;
   currentJob.cancelled = true;
   killTree(currentJob.child);
+  if (currentJob.forceSettle) currentJob.forceSettle();
   return true;
+}
+
+// 설정에 직접 넣은 CLI 경로 검사. .cmd/.bat 는 셸로 실행하므로 따옴표·셸 특수문자가 있으면 다른 명령이 실행될 수 있다.
+const UNSAFE_PATH_CHARS = /["%&|<>^!`\r\n]/;
+function checkCustomCliPath(engine, exe) {
+  const name = engine === 'codex' ? 'Codex' : 'Claude';
+  if (!path.isAbsolute(exe)) return `${name} CLI 경로는 전체 경로(예: C:\\Users\\...\\${engine}.cmd)로 입력해 주세요.`;
+  if (UNSAFE_PATH_CHARS.test(exe)) return `${name} CLI 경로에 쓸 수 없는 문자(" % & | < > ^ ! 등)가 있습니다.`;
+  let st = null;
+  try { st = fs.statSync(exe); } catch { /* 없음 */ }
+  if (!st || !st.isFile()) return `설정된 ${name} CLI 경로에 파일이 없습니다: ${exe}`;
+  const base = path.basename(exe).toLowerCase();
+  const okName = isWin ? new RegExp(`^${engine}[\\w.-]*\\.(exe|cmd|bat)$`) : new RegExp(`^${engine}[\\w.-]*$`);
+  if (!okName.test(base)) return `${name} CLI 실행 파일(${isWin ? `${engine}.exe 또는 ${engine}.cmd` : engine})을 지정해 주세요. 지금 지정한 파일: ${path.basename(exe)}`;
+  return '';
 }
 
 function buildInvocation(engine, exe) {
@@ -359,10 +375,11 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
   };
 
   let exe = (customPath || '').trim().replace(/^"(.*)"$/, '$1');
+  // 예전에 'claude' 처럼 명령 이름만 저장해 둔 경우는 자동 찾기로 대신한다
+  if (exe && !path.isAbsolute(exe) && !/[\\/]/.test(exe)) exe = '';
   if (exe) {
-    if (path.isAbsolute(exe) && !fs.existsSync(exe)) {
-      throw new AiCliError(`설정된 ${engineName} CLI 경로에 파일이 없습니다: ${exe}`, 'CLI_NOT_FOUND');
-    }
+    const bad = checkCustomCliPath(engine === 'codex' ? 'codex' : 'claude', exe);
+    if (bad) throw new AiCliError(bad, 'CLI_NOT_FOUND');
   } else {
     const det = await detectCachedCliPath(engine);
     assertActive();
@@ -387,7 +404,16 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
     const err = [];
     let outBytes = 0;
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; killTree(child); }, TIMEOUT_MS);
+    let settled = false;
+    let forceTimer = null;
+    // 종료 신호를 보낸 뒤에도 close 가 오지 않으면(손자 프로세스가 파이프를 잡고 있는 등) 5초 뒤 강제로 끝낸다
+    job.forceSettle = () => {
+      if (forceTimer) return;
+      forceTimer = setTimeout(() => finish(() => reject(timedOut
+        ? new AiCliError(`${engineName} CLI가 ${TIMEOUT_MS / 1000}초 안에 응답하지 않아 중단했습니다.`, 'TIMEOUT')
+        : new AiCliError('AI 분석을 중단했습니다.', 'CANCELLED'))), 5000);
+    };
+    const timer = setTimeout(() => { timedOut = true; killTree(child); job.forceSettle(); }, TIMEOUT_MS);
 
     child.stdout.on('data', d => { outBytes += d.length; if (outBytes <= MAX_OUTPUT_BYTES) out.push(d); });
     child.stderr.on('data', d => { if (err.length < 200) err.push(d); });
@@ -395,7 +421,10 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
     child.stdin.end(prompt, 'utf8');
 
     const finish = (fn) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       if (currentJob === job) currentJob = null;
       fn();
     };
@@ -448,5 +477,5 @@ module.exports = {
   generateStrategy,
   cancel,
   // 테스트용
-  _internal: { buildPrompt, pickPromptVideos, buildInvocation, extractJsonObject, normalizeReport, decodeConsole }
+  _internal: { buildPrompt, pickPromptVideos, buildInvocation, extractJsonObject, normalizeReport, decodeConsole, checkCustomCliPath }
 };

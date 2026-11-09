@@ -255,6 +255,7 @@
               <button type="button" class="chip chip-active" id="filter-clear" title="필터 해제"><span id="filter-word"></span><svg><use href="#i-close"/></svg></button>
             </span>
             <span class="filter-note" id="filter-note"></span>
+            <button type="button" class="cache-chip" id="btn-refresh" hidden><svg aria-hidden="true"><use href="#i-refresh"/></svg><span id="cache-age"></span></button>
           </div>
           <div class="feed" id="video-feed" tabindex="-1"></div>
           <div class="trend-view" id="trend-view" hidden></div>
@@ -331,6 +332,11 @@
               <button type="button" id="btn-clear-cache" class="btn btn-ghost btn-sm">캐시 비우기</button>
             </div>
             <p class="form-hint">같은 채널을 다시 만나면 저장된 평소 조회수를 써서 조회 유닛을 아낍니다. 길게 보관할수록 유닛은 덜 쓰지만 평소 조회수가 덜 최신입니다.</p>
+            <div class="input-row">
+              <label class="pop-field grow"><span class="form-label">같은 조건 검색 결과 다시 쓰기</span>
+                <select id="set-result-cache" class="select"><option value="0">쓰지 않음(항상 새로 검색)</option><option value="30">30분</option><option value="60">1시간</option><option value="180">3시간</option><option value="360">6시간</option></select></label>
+            </div>
+            <p class="form-hint">이 시간 안에 같은 조건으로 다시 검색하면(형식·기간을 바꿨다 되돌린 경우 포함) 저장된 결과를 보여 주고 할당량을 쓰지 않습니다. 목록 위 [새로 검색]으로 언제든 새로 받을 수 있습니다.</p>
             <p class="form-hint" id="cache-stats"></p>
           </section>
 

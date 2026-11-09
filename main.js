@@ -17,14 +17,18 @@ const aiCliService = require('./services/ai-cli');
 const { computeTrends } = require('./services/trends');
 const { createUsageCounter } = require('./services/usage');
 const { createMetaCache } = require('./services/meta-cache');
+const { createResultCache, resultKey } = require('./services/result-cache');
 // 설정(암호화된 API 키 포함)은 app ready 이후에만 읽는다. safeStorage 는 그 전에 복호화할 수 없어
 // 미리 읽으면 키가 빈 값으로 캐시된다. 캐시 유지 시간은 ready 후 설정값으로 맞춘다.
 const channelCache = createChannelCache(paths.channelCacheFile);
 const metaCache = createMetaCache(paths.metaCacheFile);
+const resultCache = createResultCache(paths.resultCacheFile);
 const usage = createUsageCounter(paths.usageFile, {
-  limits: () => { const c = configService.loadConfig(); return { search: c.searchLimit, units: c.unitLimit }; }
+  limits: () => { const c = configService.loadConfig(); return { search: c.searchLimit, units: c.unitLimit }; },
+  // 사용량은 키별로 센다(키를 바꾸면 새 키 기준으로 표시·차단)
+  currentKey: () => configService.loadConfig().youtubeApiKey
 });
-youtubeService.setUsageRecorder(endpoint => usage.record(endpoint));
+youtubeService.setUsageRecorder((endpoint, apiKey) => usage.record(endpoint, apiKey));
 
 const FORMATS = ['all', 'long', 'shorts'];
 const PERIODS = ['24h', '3d', '7d', '30d', '90d', '1y', 'all', 'custom'];
@@ -139,9 +143,12 @@ ipcMain.handle('config:get', wrap(() => ({
   keyNeedsReentry: configService.keyNeedsReentry()
 })));
 ipcMain.handle('config:save', wrap((cfg) => {
+  const keyBefore = configService.loadConfig().youtubeApiKey;
   const res = configService.saveConfig(cfg);
   if (!res.success) throw Object.assign(new Error(`설정을 저장하지 못했습니다: ${res.error}`), { code: 'CONFIG_SAVE' });
   channelCache.setTtl(res.config.cacheTtlHours * 3600000);
+  // 키를 바꾸면 국가·카테고리 목록을 바로 다시 받을 수 있게 실패 기록을 지운다
+  if (res.config.youtubeApiKey !== keyBefore) metaCache.resetFailures();
   return res.config;
 }));
 ipcMain.handle('config:defaults', wrap(() => configService.typedDefaults()));
@@ -149,8 +156,10 @@ ipcMain.handle('config:defaults', wrap(() => configService.typedDefaults()));
 // API 키 확인(1 유닛): 저장 전에 키가 실제로 동작하는지 본다
 ipcMain.handle('config:validate-key', wrap(async ({ key }) => {
   try {
-    await youtubeService.validateApiKey(String(key || '').trim());
-    return { checkedAt: new Date().toISOString() };
+    const k = String(key || '').trim();
+    await youtubeService.validateApiKey(k);
+    // 확인한 키의 오늘 사용량(새 키면 확인 1 유닛만)을 함께 돌려 바로 표시한다
+    return { checkedAt: new Date().toISOString(), usage: usage.snapshot(k) };
   } finally {
     usage.flush();
   }
@@ -175,46 +184,87 @@ ipcMain.handle('meta:categories', wrap(async ({ region }) => {
   }
 }));
 
-// 캐시 현황·비우기(채널 평소 조회수 + 국가·카테고리 목록)
-ipcMain.handle('cache:stats', wrap(() => channelCache.stats()));
+// 캐시 현황·비우기(채널 평소 조회수 + 국가·카테고리 목록 + 최근 검색 결과)
+const cacheStats = () => ({ ...channelCache.stats(), ...resultCache.stats() });
+ipcMain.handle('cache:stats', wrap(cacheStats));
 ipcMain.handle('cache:clear', wrap(() => {
   channelCache.clear();
   metaCache.clear();
-  return channelCache.stats();
+  resultCache.clear();
+  return cacheStats();
 }));
 
 ipcMain.handle('cli:detect-path', wrap(({ engine }) => aiCliService.detectCliPath(engine === 'codex' ? 'codex' : 'claude')));
 
 // 키워드는 선택: 비우면 국가·주제·기간·형식 조건의 인기 영상 전체를 분석한다
-ipcMain.handle('youtube:search', wrap(async ({ query, videoCategoryId, publishedPeriod, customFrom, customTo, format, order, region, language, langOnly }) => {
-  const q = String(query || '').trim().slice(0, 100);
+//   source 'chart' = YouTube 인기 차트(검색 한도를 쓰지 않음, 키워드·기간 없음)
+//   fresh  true    = 저장된 결과를 쓰지 않고 새로 검색
+let searchBusy = false;
+ipcMain.handle('youtube:search', wrap(async ({ source, query, videoCategoryId, publishedPeriod, customFrom, customTo, format, order, region, language, langOnly, fresh }) => {
+  const chart = source === 'chart';
+  const q = chart ? '' : String(query || '').trim().slice(0, 100);
   const config = configService.loadConfig();
+  const params = {
+    source: chart ? 'chart' : 'search',
+    query: q,
+    region: safeRegion(region),
+    language: safeLang(language),
+    langOnly: langOnly !== false,
+    videoCategoryId: safeCategory(videoCategoryId),
+    publishedPeriod: safePeriod(publishedPeriod),
+    customFrom: String(customFrom || ''),
+    customTo: String(customTo || ''),
+    format: safeFormat(format),
+    order: safeOrder(order)
+  };
+
+  // 같은 조건을 최근에 검색했으면 그 결과를 다시 쓴다(할당량 0)
+  const key = resultKey(params);
+  const maxAge = (config.resultCacheMinutes || 0) * 60000;
+  if (!fresh) {
+    const hit = resultCache.get(key, maxAge);
+    if (hit) return { ...hit.data, cached: { at: hit.t }, usage: usage.snapshot() };
+  }
+
+  // 남은 검색 수 확인과 실제 사용 사이에 다른 검색이 끼어 한도를 넘지 않도록 한 번에 하나만 실행한다
+  if (searchBusy) throw Object.assign(new Error('이전 검색이 아직 진행 중입니다. 끝난 뒤 다시 시도해 주세요.'), { code: 'BUSY' });
   const remaining = usage.remainingSearch();
-  if (config.youtubeApiKey && remaining <= 0) {
+  if (!chart && config.youtubeApiKey && remaining <= 0) {
     const s = usage.snapshot();
     const at = new Date(s.resetAt).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' });
-    throw Object.assign(new Error(`오늘 검색 한도(${s.searchLimit}회)를 모두 썼습니다. 한국 시간 ${at}에 초기화됩니다. 할당량을 늘렸다면 [설정]에서 한도를 바꿔 주세요.`), { code: 'QUOTA_LOCAL' });
+    throw Object.assign(new Error(`오늘 검색 한도(${s.searchLimit}회)를 모두 썼습니다. 한국 시간 ${at}에 초기화됩니다. 그동안 [빠른 시작]의 인기 차트(검색 0회)는 쓸 수 있습니다. 할당량을 늘렸다면 [설정]에서 한도를 바꿔 주세요.`), { code: 'QUOTA_LOCAL' });
   }
+  searchBusy = true;
   try {
-    const result = await youtubeService.searchYouTube({
+    const common = {
       apiKey: config.youtubeApiKey,
-      query: q,
-      maxResults: 50,
-      regionCode: safeRegion(region),
-      relevanceLanguage: safeLang(language),
-      langOnly: langOnly !== false,
-      videoCategoryId: safeCategory(videoCategoryId),
-      publishedPeriod: safePeriod(publishedPeriod),
-      customRange: { from: String(customFrom || ''), to: String(customTo || '') },
-      format: safeFormat(format),
-      order: safeOrder(order),
-      channelCache,
-      maxSearchCalls: remaining
-    });
+      regionCode: params.region,
+      relevanceLanguage: params.language,
+      langOnly: params.langOnly,
+      videoCategoryId: params.videoCategoryId,
+      format: params.format,
+      channelCache
+    };
+    const result = chart
+      ? await youtubeService.fetchPopularChart(common)
+      : await youtubeService.searchYouTube({
+        ...common,
+        query: q,
+        maxResults: 50,
+        publishedPeriod: params.publishedPeriod,
+        customRange: { from: params.customFrom, to: params.customTo },
+        order: params.order,
+        maxSearchCalls: remaining
+      });
     const analytics = youtubeService.computeMarketAnalytics(result.videos, q);
     const trends = computeTrends(result.videos, result.format);
-    return { videos: result.videos, excluded: result.excluded, searchInfo: result.searchInfo, baseline: result.baseline, format: result.format, analytics, trends, usage: usage.snapshot() };
+    const data = { videos: result.videos, excluded: result.excluded, searchInfo: result.searchInfo, baseline: result.baseline, format: result.format, analytics, trends };
+    // 일부만 받은 결과(채널 정보 실패·한도 때문에 보충 검색이나 차트 다음 페이지를 못 받음)는 다시 쓰지 않는다
+    const partial = result.baseline.quotaHit || result.baseline.channelFailed || result.searchInfo.topupStopped;
+    if (maxAge > 0 && result.videos.length && !partial) resultCache.set(key, data);
+    return { ...data, cached: null, usage: usage.snapshot() };
   } finally {
+    searchBusy = false;
     usage.flush();
   }
 }));

@@ -32,7 +32,11 @@ const state = {
   customTo: '',
   regions: [],
   categories: [],
-  activePreset: ''
+  activePreset: '',
+  source: 'search',    // 마지막 결과의 출처: search(검색) | chart(YouTube 인기 차트)
+  lastRequest: null,   // 마지막 검색 요청({ query, opts }) — [다시 시도]·[새로 검색]에 쓴다
+  cachedAt: 0,         // 지금 결과가 저장된 결과면 그 시각(ms)
+  saving: false        // 설정 저장 중(모달 닫기 막음)
 };
 
 const LANGS = [
@@ -44,14 +48,16 @@ const LANG_NAME = Object.fromEntries(LANGS);
 const FORMAT_NAME = { all: '영상', long: '롱폼', shorts: '쇼츠' };
 const SEARCH_COST = { all: '3~6회', long: '2~4회', shorts: '1~3회' };
 
-// 빠른 시작: 키워드 없이 조건만으로 인기 영상 분석(TrendLens 등과 같은 조회수순 검색)
+// 빠른 시작: 키워드 없이 조건만으로 인기 영상 분석
+//   source 'chart'  = YouTube 인기 차트(국가·주제별 지금 인기 영상, 검색 한도 0회 · 조회 2 유닛). 기간 조건 없음
+//   source 'search' = 조회수순 검색(쇼츠는 인기 차트에 거의 오르지 않아 검색으로 찾는다)
 const PRESETS = [
-  { id: 'popular', title: r => `${r} 인기 영상`, desc: '최근 7일 · 쇼츠·롱폼', format: 'all', period: '7d', category: '0' },
-  { id: 'shorts', title: () => '지금 뜨는 쇼츠', desc: '최근 24시간 · 쇼츠', format: 'shorts', period: '24h', category: '0' },
-  { id: 'long', title: () => '인기 롱폼', desc: '최근 3일 · 롱폼', format: 'long', period: '3d', category: '0' },
-  { id: 'ent', title: () => '엔터테인먼트', desc: '최근 7일 · 엔터테인먼트', format: 'all', period: '7d', category: '24' },
-  { id: 'music', title: () => '음악', desc: '최근 7일 · 음악', format: 'all', period: '7d', category: '10' },
-  { id: 'game', title: () => '게임', desc: '최근 7일 · 게임', format: 'all', period: '7d', category: '20' }
+  { id: 'popular', source: 'chart', title: r => `${r} 인기 영상`, desc: '인기 차트 · 쇼츠·롱폼', format: 'all', category: '0' },
+  { id: 'shorts', source: 'search', title: () => '지금 뜨는 쇼츠', desc: '최근 24시간 · 쇼츠', format: 'shorts', period: '24h', category: '0' },
+  { id: 'long', source: 'chart', title: () => '인기 롱폼', desc: '인기 차트 · 롱폼', format: 'long', category: '0' },
+  { id: 'ent', source: 'chart', title: () => '엔터테인먼트', desc: '인기 차트 · 엔터테인먼트', format: 'all', category: '24' },
+  { id: 'music', source: 'chart', title: () => '음악', desc: '인기 차트 · 음악', format: 'all', category: '10' },
+  { id: 'game', source: 'chart', title: () => '게임', desc: '인기 차트 · 게임', format: 'all', category: '20' }
 ];
 
 // 상단 검색 조건 기억(키워드 제외). 브라우저 저장소는 app-data/electron 안에 있다.
@@ -169,7 +175,8 @@ const el = {
   keyCheckStatus: $('key-check-status'), btnCheckKey: $('btn-check-key'),
   defRegion: $('def-region'), defLang: $('def-lang'), defFormat: $('def-format'), defPeriod: $('def-period'), defOrder: $('def-order'),
   defLangOnly: $('def-lang-only'), defRemember: $('def-remember'),
-  setSearchLimit: $('set-search-limit'), setUnitLimit: $('set-unit-limit'), setCacheTtl: $('set-cache-ttl'),
+  setSearchLimit: $('set-search-limit'), setUnitLimit: $('set-unit-limit'), setCacheTtl: $('set-cache-ttl'), setResultCache: $('set-result-cache'),
+  btnRefresh: $('btn-refresh'), cacheAge: $('cache-age'),
   btnClearCache: $('btn-clear-cache'), cacheStats: $('cache-stats'), btnResetDefaults: $('btn-reset-defaults')
 };
 
@@ -252,7 +259,11 @@ async function init() {
   loadCategories();
 }
 
-async function refreshUsage(snapshot) {
+/**
+ * @param snapshot 사용량(없으면 현재 키 기준으로 받아 온다)
+ * @param opts.hintOnly 설정 창 안내에만 표시(저장 전 후보 키 — 타이틀바는 저장된 키 기준 유지)
+ */
+async function refreshUsage(snapshot, { hintOnly = false } = {}) {
   let u = snapshot;
   if (!u) {
     const res = await window.api.getUsage();
@@ -260,12 +271,13 @@ async function refreshUsage(snapshot) {
     u = res.data;
   }
   const n = x => x.toLocaleString('ko-KR');
+  const reset = u.resetAt ? new Date(u.resetAt).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' }) : '오후 4~5시';
+  if (el.usageHint) el.usageHint.textContent = `오늘 ${hintOnly ? '확인한 키' : '이 키'} 사용량: 검색 ${n(u.search)}/${n(u.searchLimit)}회 · 조회 ${n(u.units)}/${n(u.unitLimit)} 유닛 · 한국 시간 ${reset}에 초기화`;
+  if (hintOnly) return;
   el.usageMeter.hidden = false;
   el.usageMeter.textContent = `오늘 API 검색 ${n(u.search)}/${n(u.searchLimit)} · 조회 ${n(u.units)}/${n(u.unitLimit)}`;
   el.usageMeter.classList.toggle('warn', u.search >= u.searchLimit * 0.8 || u.units >= u.unitLimit * 0.8);
-  const reset = u.resetAt ? new Date(u.resetAt).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: 'numeric', minute: '2-digit' }) : '오후 4~5시';
-  el.usageMeter.title = `이 PC에서 오늘(태평양 시간 ${u.day}) 쓴 YouTube API 사용량입니다. 한국 시간 ${reset}에 초기화됩니다. 한도는 [설정]에서 바꿀 수 있습니다. 같은 Google Cloud 프로젝트의 키를 다른 곳에서도 쓰면 실제 사용량은 더 많을 수 있습니다.`;
-  if (el.usageHint) el.usageHint.textContent = `오늘 이 PC 사용량: 검색 ${n(u.search)}/${n(u.searchLimit)}회 · 조회 ${n(u.units)}/${n(u.unitLimit)} 유닛 · 한국 시간 ${reset}에 초기화`;
+  el.usageMeter.title = `이 PC에서 오늘(태평양 시간 ${u.day}) 이 API 키로 쓴 YouTube API 사용량입니다(키마다 따로 셉니다). 한국 시간 ${reset}에 초기화됩니다. 한도는 [설정]에서 바꿀 수 있습니다. 같은 Google Cloud 프로젝트의 키를 다른 곳에서도 쓰면 실제 사용량은 더 많을 수 있습니다.`;
 }
 
 async function setupWindowControls() {
@@ -296,31 +308,48 @@ function setupEvents() {
     handleSearch();
   });
 
-  const rerun = (label) => {
+  // chartOk: 인기 차트 결과를 보고 있을 때 이 조건(형식·주제·국가)만 바뀌면 차트로 다시 받는다(검색 0회)
+  const rerun = (label, chartOk = false) => {
     savePrefs();
     state.activePreset = '';
     renderPresets();
     if (!state.searched && !state.searching) return;
-    toast(`${label} 조건을 바꿔 다시 검색합니다.`);
-    if (state.searching) state.pendingRerun = true;
-    else handleSearch(state.keyword);
+    if (state.searching) {
+      // 진행 중인 검색이 끝나면 다시 검색(여러 번 바꾸면 차트로 받을 수 있는 변경만 있었을 때만 차트 유지)
+      const prev = state.pendingRerun;
+      state.pendingRerun = { label, chartOk: chartOk && (!prev || prev.chartOk) };
+      toast(`${label} 조건을 바꿨습니다. 지금 검색이 끝나면 이 조건으로 다시 검색합니다.`);
+      return;
+    }
+    rerunSearch(label, chartOk);
   };
-  const segHandler = (group, attr, label) => group.addEventListener('click', (e) => {
+  const segHandler = (group, attr, label, chartOk) => group.addEventListener('click', (e) => {
     const btn = e.target.closest('.seg-btn');
     if (!btn || btn.classList.contains('active')) return;
     setSegment(group, attr, btn.dataset[attr]);
-    rerun(label);
+    rerun(label, chartOk);
   });
   // 형식·기간·주제는 검색 조건 → 바뀌면 다시 검색
-  segHandler(el.formatToggle, 'format', '형식');
+  segHandler(el.formatToggle, 'format', '형식', true);
   // '직접'은 바로 바꾸지 않고 날짜를 고르는 창을 연다
   el.periodToggle.addEventListener('click', (e) => {
     const btn = e.target.closest('.seg-btn');
     if (btn && btn.dataset.period === 'custom') { e.stopImmediatePropagation(); openAdvanced(true); }
   }, true);
-  segHandler(el.periodToggle, 'period', '기간');
-  segHandler(el.orderToggle, 'order', '검색 기준');
-  el.categoryFilter.addEventListener('change', () => { state.category = el.categoryFilter.value; rerun('주제'); });
+  segHandler(el.periodToggle, 'period', '기간', false);
+  segHandler(el.orderToggle, 'order', '검색 기준', false);
+  el.categoryFilter.addEventListener('change', () => { state.category = el.categoryFilter.value; rerun('주제', true); });
+  // 저장된 결과를 보고 있을 때: 새로 검색
+  el.btnRefresh.addEventListener('click', () => {
+    if (state.searching || !state.lastRequest) return;
+    handleSearch(state.lastRequest.query, { ...state.lastRequest.opts, fresh: true });
+  });
+  // 배율이 다른 모니터로 옮기면 CSS 크기는 같아도 산점도를 새 배율로 다시 그린다
+  const watchDpr = () => {
+    const mq = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    mq.addEventListener('change', () => { drawScatter(); watchDpr(); }, { once: true });
+  };
+  watchDpr();
   // 국가·언어·직접 기간
   el.btnAdvanced.addEventListener('click', () => (el.advPopover.hidden ? openAdvanced(false) : closeAdvanced()));
   el.advCancel.addEventListener('click', closeAdvanced);
@@ -370,6 +399,10 @@ function setupEvents() {
 
   // Feed actions (delegated)
   el.feed.addEventListener('click', onFeedClick);
+  // 제목(role=link)은 Enter 로도 연다
+  el.feed.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.matches('.vtitle[data-act]')) { e.preventDefault(); e.target.click(); }
+  });
   el.feed.addEventListener('error', (e) => {
     if (e.target.tagName === 'IMG') e.target.classList.add('broken');
   }, true);
@@ -382,7 +415,7 @@ function setupEvents() {
   el.cancelBtn.addEventListener('click', closeSettings);
   el.modal.addEventListener('mousedown', (e) => { if (e.target === el.modal) closeSettings(); });
   el.saveBtn.addEventListener('click', saveSettings);
-  el.apiKey.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveSettings(); });
+  el.apiKey.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveSettings(); } });
   el.btnCheckKey.addEventListener('click', checkKey);
   el.btnClearCache.addEventListener('click', clearCache);
   el.btnResetDefaults.addEventListener('click', resetSettingDefaults);
@@ -399,8 +432,12 @@ function setupEvents() {
   $('btn-open-console').addEventListener('click', () => window.api.openExternal('https://console.cloud.google.com/apis/library/youtube.googleapis.com'));
 
   document.addEventListener('keydown', (e) => {
+    // 설정 창이 열려 있으면 Esc 는 설정 창만 닫고, 뒤 화면 단축키는 쓰지 않는다
+    if (!el.modal.hidden) {
+      if (e.key === 'Escape') closeSettings();
+      return;
+    }
     if (e.key === 'Escape' && !el.advPopover.hidden) { closeAdvanced(); el.btnAdvanced.focus(); return; }
-    if (e.key === 'Escape' && !el.modal.hidden) closeSettings();
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       el.searchInput.focus();
@@ -428,13 +465,27 @@ function autoLabel() {
   return `${regionName()} ${cat ? cat + ' ' : ''}인기 ${FORMAT_NAME[selectedFormat()]}`;
 }
 
+// 조건을 바꿔 다시 검색: 검색창에 보이는 키워드로(입력만 하고 제출하지 않은 키워드도 지우지 않고 그대로 쓴다).
+// 인기 차트를 보고 있었고 차트로 받을 수 있는 조건(형식·주제·국가)만 바뀌었으면 차트로 다시 받는다.
+function rerunSearch(label, chartOk, fromChart = state.source === 'chart') {
+  const query = el.searchInput.value.trim();
+  const useChart = chartOk && fromChart && !query;
+  toast(useChart ? `${label} 조건을 바꿔 인기 차트를 다시 받습니다(검색 0회).`
+    : fromChart ? `${label} 조건은 인기 차트에 없어 조회수순 검색으로 바꿉니다(검색 ${SEARCH_COST[selectedFormat()]} 사용).`
+    : `${label} 조건을 바꿔 다시 검색합니다.`);
+  handleSearch(query, useChart ? { source: 'chart' } : {});
+}
+
 /**
  * @param forcedQuery 키워드(비우면 조건에 맞는 인기 영상 전체)
  * @param opts.preset 빠른 시작으로 실행한 경우 그 id, opts.label 표시 이름
+ * @param opts.source 'chart' 면 YouTube 인기 차트(키워드·기간 없음, 검색 0회)
+ * @param opts.fresh  true 면 저장된 결과를 쓰지 않고 새로 검색
  */
 async function handleSearch(forcedQuery, opts = {}) {
-  const query = (forcedQuery ?? el.searchInput.value).trim();
-  if (selectedPeriod() === 'custom' && !(state.customFrom && state.customTo)) {
+  const chart = opts.source === 'chart';
+  const query = chart ? '' : (forcedQuery ?? el.searchInput.value).trim();
+  if (!chart && selectedPeriod() === 'custom' && !(state.customFrom && state.customTo)) {
     toast('직접 지정할 기간(시작일·종료일)을 먼저 골라 주세요.');
     openAdvanced(true);
     return;
@@ -449,14 +500,19 @@ async function handleSearch(forcedQuery, opts = {}) {
   const seq = ++state.searchSeq;
   el.searchInput.value = query;
   const label = query || opts.label || autoLabel();
+  state.lastRequest = { query, opts: { source: opts.source, preset: opts.preset, label: opts.label } };
   state.activePreset = query ? '' : (opts.preset || '');
-  renderPresets();
   setSearching(true);
   stopAi('새 검색이 끝나면 기획안을 다시 만듭니다.');
+  // 검색하는 동안에는 이전 결과의 필터 줄·형식 버튼을 숨긴다(필터를 바꿔 이전 목록이 다시 그려지지 않도록)
+  el.filterBar.hidden = true;
+  el.btnRefresh.hidden = true;
   el.feed.innerHTML = Array.from({ length: 6 }, () => '<div class="skeleton"></div>').join('');
   el.feedCount.textContent = '';
 
   const res = await window.api.searchYouTube({
+    source: chart ? 'chart' : 'search',
+    fresh: !!opts.fresh,
     query,
     videoCategoryId: selectedCategory(),
     publishedPeriod: selectedPeriod(),
@@ -474,8 +530,9 @@ async function handleSearch(forcedQuery, opts = {}) {
 
   // 검색 중에 주제·기간이 바뀌었으면 결과를 버리고 새 조건으로 다시 검색
   if (state.pendingRerun) {
-    state.pendingRerun = false;
-    handleSearch(query);
+    const p = state.pendingRerun;
+    state.pendingRerun = null;
+    rerunSearch(p.label || '검색', !!p.chartOk, chart);
     return;
   }
 
@@ -490,6 +547,8 @@ async function handleSearch(forcedQuery, opts = {}) {
   state.keyword = query;
   state.label = label;
   state.searched = true;
+  state.source = chart ? 'chart' : 'search';
+  state.cachedAt = res.data.cached ? res.data.cached.at : 0;
   state.videos = res.data.videos;
   state.analytics = res.data.analytics;
   state.trends = res.data.trends;
@@ -514,10 +573,23 @@ async function handleSearch(forcedQuery, opts = {}) {
   renderFeed();
   renderTrends();
   const b = res.data.baseline;
-  if (b && b.quotaHit) {
+  if (b && b.channelFailed) {
+    toast('채널 정보를 받지 못해 구독자 수·채널 평소 조회수 없이 표시합니다. 잠시 후 같은 조건으로 다시 검색해 보세요.', 'info');
+  } else if (b && b.quotaHit) {
     toast('API 사용 한도 때문에 일부 채널의 평소 조회수를 확인하지 못했습니다. 해당 영상은 구독자 대비 배수로 추정해 표시합니다.', 'info');
   }
   runAi();
+}
+
+// 저장된 결과를 보여 주고 있으면 목록 위에 "n분 전 결과 · 새로 검색"을 띄운다
+function renderCacheChip() {
+  const at = state.cachedAt;
+  el.btnRefresh.hidden = !at;
+  if (!at) return;
+  const min = Math.max(0, Math.round((Date.now() - at) / 60000));
+  const ago = min < 1 ? '방금' : min < 60 ? `${min}분 전` : `${Math.floor(min / 60)}시간 ${min % 60 ? `${min % 60}분 ` : ''}전`;
+  el.cacheAge.textContent = `${ago} 결과 · 새로 검색`;
+  el.btnRefresh.title = `${new Date(at).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}에 받은 결과를 다시 보여 주고 있습니다(할당량 0). 누르면 지금 다시 검색합니다.`;
 }
 
 function resetResults() {
@@ -530,8 +602,16 @@ function resetResults() {
   state.trends = null;
   state.keywordFilter = '';
   state.aiReport = null;
+  state.cachedAt = 0;
+  state.activePreset = '';
   state.openTags.clear();
   el.insights.hidden = true;
+  // 이전 결과의 필터 줄·형식 버튼·안내가 오류 화면 위에 남지 않도록
+  el.filterBar.hidden = true;
+  el.feedFormat.hidden = true;
+  el.filterNote.textContent = '';
+  el.btnRefresh.hidden = true;
+  renderPresets();
   renderTrends();
   el.btnAiRun.disabled = true;
 }
@@ -570,10 +650,19 @@ async function loadRegions() {
   if (res.ok && res.data.source === 'api') refreshUsage(); // 처음 받을 때 1 유닛 사용
 }
 
-async function loadCategories(region = state.region) {
+async function loadCategories(region = state.region, { resetOnFail = false } = {}) {
   const res = await window.api.getCategories(region);
   if (region !== state.region) return; // 그사이 국가가 바뀌었으면 버림
-  if (!res.ok) return; // 목록을 못 받으면 복원할 주제(state.category)를 그대로 둔다
+  if (!res.ok) {
+    // 시작할 때는 복원할 주제(state.category)를 그대로 두고, 국가를 바꾼 경우에는 '전체'로 되돌린다
+    if (resetOnFail) {
+      state.categories = [];
+      state.category = '0';
+      el.categoryFilter.innerHTML = '<option value="0">전체</option>';
+      renderPresets();
+    }
+    return;
+  }
   state.categories = res.data.items;
   const want = state.category;
   el.categoryFilter.innerHTML = '<option value="0">전체</option>' + state.categories.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
@@ -586,11 +675,20 @@ async function loadCategories(region = state.region) {
 function renderPresets() {
   if (!el.presets) return;
   const r = regionName();
+  // 다시 그려도 키보드 포커스가 사라지지 않도록 포커스가 있던 버튼을 기억했다가 되돌린다
+  const focused = el.presets.contains(document.activeElement) ? document.activeElement.dataset.preset : '';
   el.presets.innerHTML = PRESETS.map(p => {
     const missing = p.category !== '0' && state.categories.length > 0 && !state.categories.some(c => c.id === p.category);
-    const tip = `${p.title(r)} · ${p.desc} · 조회수순 · 키워드 없이 분석 · 검색 ${SEARCH_COST[p.format]}${missing ? ' · 이 국가에서는 쓸 수 없는 주제입니다' : ''}`;
-    return `<button type="button" class="preset${state.activePreset === p.id ? ' active' : ''}" data-preset="${p.id}" title="${esc(tip)}"${missing || state.searching ? ' disabled' : ''}><strong>${esc(p.title(r))}</strong><span>${esc(p.desc)}</span></button>`;
+    const how = p.source === 'chart'
+      ? 'YouTube 인기 차트(지금 인기 영상, 기간 조건 없음) · 검색 0회 · 조회 약 100~300 유닛(채널 캐시가 있으면 더 적음)'
+      : `조회수순 검색 · 검색 ${SEARCH_COST[p.format]}`;
+    const tip = `${p.title(r)} · ${p.desc} · 키워드 없이 분석 · ${how}${missing ? ' · 이 국가에서는 쓸 수 없는 주제입니다' : ''}`;
+    return `<button type="button" class="preset${state.activePreset === p.id ? ' active' : ''}" data-preset="${p.id}" title="${esc(tip)}" aria-disabled="${missing || state.searching}"${missing ? ' disabled' : ''}><strong>${esc(p.title(r))}</strong><span>${esc(p.desc)}</span></button>`;
   }).join('');
+  if (focused) {
+    const btn = el.presets.querySelector(`[data-preset="${focused}"]`);
+    if (btn && !btn.disabled) btn.focus();
+  }
 }
 
 function runPreset(id) {
@@ -598,12 +696,15 @@ function runPreset(id) {
   if (!p || state.searching) return;
   el.searchInput.value = '';
   setSegment(el.formatToggle, 'format', p.format);
-  setSegment(el.periodToggle, 'period', p.period);
-  setSegment(el.orderToggle, 'order', 'viewCount');
+  // 인기 차트는 기간·검색 기준이 없으므로 툴바의 기간·검색 기준은 그대로 둔다
+  if (p.source !== 'chart') {
+    setSegment(el.periodToggle, 'period', p.period);
+    setSegment(el.orderToggle, 'order', 'viewCount');
+  }
   state.category = p.category;
   setSelect(el.categoryFilter, p.category);
   savePrefs();
-  handleSearch('', { preset: p.id, label: p.title(regionName()) });
+  handleSearch('', { preset: p.id, label: p.title(regionName()), source: p.source });
 }
 
 function openAdvanced(focusDates = false) {
@@ -646,6 +747,7 @@ async function applyAdvanced() {
   if (from && to && from > to) return fail('시작일이 종료일보다 늦습니다.');
   if (from && from > kstToday()) return fail('시작일이 오늘보다 늦습니다.');
   const before = JSON.stringify([state.region, state.language, state.langOnly, state.customFrom, state.customTo, selectedPeriod()]);
+  const periodBefore = selectedPeriod();
   const region = el.regionSelect.value || state.region;
   const regionChanged = region !== state.region;
   state.region = region;
@@ -662,14 +764,20 @@ async function applyAdvanced() {
   updateConditionLabels();
   if (regionChanged) {
     state.category = selectedCategory();
-    await loadCategories();
+    // 새 국가의 주제 목록을 못 받으면 이전 국가의 주제가 남지 않도록 '전체'로 되돌린다
+    await loadCategories(state.region, { resetOnFail: true });
   }
   savePrefs();
-  // 다른 조건 변경과 같은 규칙: 이미 검색한 결과가 있을 때만 그 키워드로 다시 검색
+  // 다른 조건 변경과 같은 규칙: 이미 검색한 결과가 있을 때만 다시 검색(기간이 그대로면 인기 차트는 차트로 다시 받음)
   if (!state.searched && !state.searching) { toast('조건을 바꿨습니다. [분석하기]나 [빠른 시작]을 누르면 이 조건으로 검색합니다.'); return; }
-  toast('국가·언어·기간 조건을 바꿔 다시 검색합니다.');
-  if (state.searching) state.pendingRerun = true;
-  else handleSearch(state.keyword);
+  const chartOk = selectedPeriod() === periodBefore;
+  if (state.searching) {
+    const prev = state.pendingRerun;
+    state.pendingRerun = { label: '국가·언어·기간', chartOk: chartOk && (!prev || prev.chartOk) };
+    toast('조건을 바꿨습니다. 지금 검색이 끝나면 이 조건으로 다시 검색합니다.');
+    return;
+  }
+  rerunSearch('국가·언어·기간', chartOk);
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +816,18 @@ function passesFilters(v, f = currentFilters()) {
 function onClientFilterChange() {
   renderFeed();
   drawScatter();
+}
+
+// 목록 필터(형식·배수·조회수·구독자·제목 키워드)를 모두 '전체'로(할당량 사용 없음)
+function resetListFilters() {
+  el.outlierFilter.value = '0';
+  el.viewsFilter.value = '0';
+  el.subsFilter.value = 'all';
+  state.keywordFilter = '';
+  state.feedView = setSegment(el.feedFormat, 'view', 'all');
+  savePrefs();
+  renderKeywordChips();
+  onClientFilterChange();
 }
 
 function setKeywordFilter(word) {
@@ -765,7 +885,7 @@ function renderKeywordChips() {
   const max = Math.max(...kws.map(k => k.count));
   el.keywordChips.innerHTML = kws.map(k => `
     <button type="button" class="kw-item ${state.keywordFilter === k.word ? 'active' : ''}" data-word="${esc(k.word)}" data-ratio="${k.count / max}"
-      title="눌러서 제목에 '${esc(k.word)}'가 들어간 영상만 보기">
+      title="눌러서 제목에 '${esc(k.word)}' 포함 영상만 보기">
       <span class="kw-word">#${esc(k.word)}</span><span class="kw-bar"><i></i></span><span class="kw-count">${k.count}개</span>
     </button>`).join('');
   // CSP(style-src 'self') 때문에 막대 길이는 CSSOM 으로 지정
@@ -798,11 +918,11 @@ function sortVideos(list) {
 function excludedNote() {
   const x = state.excluded || {};
   const parts = [];
-  if (x.spam) parts.push(`해시태그 도배 ${x.spam}`);
-  if (x.language) parts.push(`해외·외국어 ${x.language}`);
-  if (x.offtopic) parts.push(`키워드 무관 ${x.offtopic}`);
-  if (x.live) parts.push(`라이브·예정 ${x.live}`);
-  if (x.format) parts.push(`다른 형식 ${x.format}`);
+  if (x.spam) parts.push(`해시태그 도배 ${x.spam}개`);
+  if (x.language) parts.push(`해외·외국어 ${x.language}개`);
+  if (x.offtopic) parts.push(`키워드 무관 ${x.offtopic}개`);
+  if (x.live) parts.push(`라이브·예정 ${x.live}개`);
+  if (x.format) parts.push(`다른 형식 ${x.format}개`);
   const total = (x.spam || 0) + (x.language || 0) + (x.offtopic || 0) + (x.live || 0) + (x.format || 0);
   return { total, parts };
 }
@@ -817,19 +937,26 @@ function scopeNote(shown) {
     `떡상 ${outliers}개: 조회수 ${minViewsLabel()} 이상이면서 채널 평소의 3배 이상인 영상입니다.`
   ];
   if (ex.total) {
-    lines.push(`제외 ${ex.total}개(${ex.parts.join(' · ')}개)는 목록·지표·트렌드·AI 어디에도 넣지 않습니다.`,
-      '해시태그만 나열한 스팸, 한국어 키워드인데 한글이 거의 없는 해외 영상, 제목·태그·설명·채널명 어디에도 키워드가 없는 영상을 걸러냅니다.');
+    lines.push(`제외 ${ex.total}개(${ex.parts.join(' · ')})는 목록·지표·트렌드·AI 어디에도 넣지 않습니다.`,
+      '해시태그만 나열한 스팸, 선택한 언어 글자가 거의 없는 해외 영상, 제목·태그·설명·채널명 어디에도 키워드가 없는 영상을 걸러냅니다.');
   }
   const si = state.searchInfo;
-  if (si) lines.push(`검색 기준: ${si.order === 'relevance' ? '관련도순' : '조회수순'} · 검색 ${si.calls}회 사용${si.topupStopped ? ' · 사용 한도 때문에 보충 검색을 일부 못 했습니다' : ''}`);
+  if (si && si.source === 'chart') {
+    lines.push(`출처: YouTube 인기 차트(${regionName()}${state.category !== '0' && categoryName() ? ` · ${categoryName()}` : ''}) · 지금 인기 영상이라 기간 조건은 쓰지 않습니다 · 검색 0회`);
+  } else if (si) {
+    lines.push(`검색 기준: ${si.order === 'relevance' ? '관련도순' : '조회수순'} · 검색 ${si.calls}회 사용${si.topupStopped ? ' · 사용 한도 때문에 보충 검색을 일부 못 했습니다' : ''}`);
+  }
+  if (state.cachedAt) lines.push(`${new Date(state.cachedAt).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}에 받은 결과를 다시 보여 주고 있습니다(할당량 0).`);
   if (shown !== n) lines.push(`지금 목록은 필터로 ${shown}개만 보여 주고 있습니다. 지표는 분석 대상 ${n}개 기준입니다.`);
   return {
-    text: `분석 대상 ${n}개 · 떡상 ${outliers}개${ex.total ? ` · 제외 ${ex.total}개` : ''}`,
+    text: `${si && si.source === 'chart' ? '인기 차트 · ' : ''}분석 대상 ${n}개 · 떡상 ${outliers}개${ex.total ? ` · 제외 ${ex.total}개` : ''}`,
     title: lines.join('\n')
   };
 }
 
 function renderFeed() {
+  // 검색 중에는 로딩 화면을 유지한다(정렬·설정 저장 등으로 이전 결과·안내 화면이 다시 그려지지 않도록)
+  if (state.searching) return;
   const hasVideos = state.videos.length > 0;
   const showFormat = hasVideos && state.format === 'all';
   el.feedFormat.hidden = !showFormat;
@@ -843,6 +970,7 @@ function renderFeed() {
   el.filterKw.hidden = !state.keywordFilter;
   el.filterWord.textContent = state.keywordFilter ? `#${state.keywordFilter}` : '';
   el.filterBar.hidden = !hasVideos;
+  renderCacheChip();
 
   if (!hasVideos) {
     el.feedCount.textContent = '';
@@ -894,6 +1022,7 @@ function ratioClass(v) {
 
 function scoreTitle(v) {
   if (v.score === null || v.score === undefined) {
+    if (/\s-\sTopic$/.test(v.channelTitle || '')) return 'YouTube가 자동으로 만든 음악 채널(- Topic)이라 구독자 수로 배수를 추정하지 않습니다. 채널 평소 조회수도 확인하지 못했습니다.';
     return v.subscriberCount === null
       ? '채널 평소 조회수와 구독자 수를 모두 확인하지 못해 배수를 계산할 수 없습니다'
       : '채널 평소 조회수를 확인하지 못했고 구독자도 0명이라 배수를 계산할 수 없습니다';
@@ -921,11 +1050,11 @@ function videoRowHtml(v) {
     : `조회수가 구독자 수(${v.subscriberCountFormatted})의 ${v.subsRatioFormatted}입니다`;
   return `
     <article class="vrow" id="v-${esc(v.id)}" data-id="${esc(v.id)}">
-      <div class="thumb">
+      <button type="button" class="thumb" data-act="open" title="YouTube에서 보기" aria-label="YouTube에서 보기">
         ${v.thumbnail ? `<img src="${esc(v.thumbnail)}" alt="" loading="lazy">` : ''}
         ${v.isShorts ? '<span class="badge badge-shorts">쇼츠</span>' : ''}
         ${v.durationFormatted ? `<span class="badge badge-duration">${esc(v.durationFormatted)}</span>` : ''}
-      </div>
+      </button>
       <div class="vinfo">
         <div class="vtop">
           <span class="ratio ${ratioClass(v)}" title="${esc(scoreTitle(v))}">${esc(badgeText)}</span>
@@ -933,12 +1062,15 @@ function videoRowHtml(v) {
           <span class="vcat">${esc(v.categoryName)}</span>
           <div class="vactions">
             <button type="button" class="vbtn" data-act="open" title="YouTube에서 보기">${icon('external')}YouTube</button>
+            <button type="button" class="vbtn" data-act="copy-title" title="제목 복사">${icon('copy')}제목</button>
             <button type="button" class="vbtn ${tagsOpen ? 'on' : ''}" data-act="tags" ${tagCount ? '' : 'disabled'} aria-expanded="${tagsOpen}" title="${tagCount ? '태그 펼쳐 보기' : '공개된 태그가 없습니다'}">${icon('tag')}태그 ${tagCount}</button>
           </div>
         </div>
-        <h3 class="vtitle" title="${esc(v.title)}">${esc(v.title)}</h3>
+        <h3 class="vtitle" data-act="open" role="link" tabindex="0" title="${esc(v.title)} · 눌러서 YouTube에서 보기">${esc(v.title)}</h3>
         <div class="vmeta">
-          <span class="vchan" title="${esc(v.channelTitle)}">${esc(v.channelTitle)}</span>
+          ${v.channelId
+            ? `<button type="button" class="vchan vchan-link" data-act="open-channel" title="${esc(v.channelTitle)} · 눌러서 채널 열기">${esc(v.channelTitle)}</button>`
+            : `<span class="vchan" title="${esc(v.channelTitle)}">${esc(v.channelTitle)}</span>`}
           <span>구독자 <b>${esc(v.subscriberCountFormatted)}</b></span>
           <span>조회수 <b>${esc(v.viewCountFormatted)}</b></span>
           <span title="같은 형식 최근 영상 조회수 중앙값">채널 평소 <b>${esc(v.channelBaseline === null ? '-' : v.channelBaselineFormatted)}</b></span>
@@ -1022,13 +1154,25 @@ async function onFeedClick(e) {
   const video = row ? state.videos.find(v => v.id === row.dataset.id) : null;
 
   if (act === 'open' && video) {
+    // 제목 글자를 드래그해 고르는 중이면 열지 않는다
+    // (키보드 Enter 로 연 경우는 e.detail 이 0 이므로 검사하지 않고, 제목 안의 선택만 본다)
+    const sel = window.getSelection();
+    if (btn.classList.contains('vtitle') && e.detail !== 0 && sel && String(sel).trim() && sel.containsNode(btn, true)) return;
     const res = await window.api.openExternal(video.url);
     if (!res.ok) toast(res.error.message, 'error');
+  } else if (act === 'open-channel' && video && /^UC[\w-]{22}$/.test(video.channelId)) {
+    const res = await window.api.openExternal(`https://www.youtube.com/channel/${video.channelId}`);
+    if (!res.ok) toast(res.error.message, 'error');
+  } else if (act === 'copy-title' && video) {
+    copyText(video.title, '제목을 복사했습니다.');
   } else if (act === 'tags' && video) {
     // 펼쳐서 태그를 먼저 보여 주고, 복사는 패널의 [복사] 버튼으로
     if (state.openTags.has(video.id)) state.openTags.delete(video.id);
     else state.openTags.add(video.id);
     row.outerHTML = videoRowHtml(video);
+    // 다시 그린 행의 [태그] 버튼으로 키보드 포커스를 되돌린다
+    const again = el.feed.querySelector(`.vrow[data-id="${CSS.escape(video.id)}"] [data-act="tags"]`);
+    if (again) again.focus();
   } else if (act === 'copy-tags' && video) {
     if (await copyText(video.tags.join(', '), `태그 ${video.tags.length}개를 복사했습니다.`)) {
       btn.classList.add('done');
@@ -1040,20 +1184,16 @@ async function onFeedClick(e) {
     el.searchInput.value = btn.dataset.word;
     handleSearch();
   } else if (act === 'retry-search') {
-    handleSearch();
+    // 마지막 요청(빠른 시작의 인기 차트 포함)을 그대로 다시
+    const last = state.lastRequest;
+    if (last) handleSearch(last.query, last.opts);
+    else handleSearch();
   } else if (act === 'ratio-all') {
     el.outlierFilter.value = '0';
     savePrefs();
     onClientFilterChange();
   } else if (act === 'reset-list-filters') {
-    el.outlierFilter.value = '0';
-    el.viewsFilter.value = '0';
-    el.subsFilter.value = 'all';
-    state.keywordFilter = '';
-    state.feedView = setSegment(el.feedFormat, 'view', 'all');
-    savePrefs();
-    renderKeywordChips();
-    onClientFilterChange();
+    resetListFilters();
   } else if (act === 'open-advanced') {
     openAdvanced(true);
   } else if (act === 'clear-keyword') {
@@ -1066,7 +1206,7 @@ async function onFeedClick(e) {
     state.category = '0';
     setSegment(el.periodToggle, 'period', 'all');
     savePrefs();
-    handleSearch(state.keyword);
+    rerunSearch('주제·기간', true);
   }
 }
 
@@ -1231,7 +1371,7 @@ function onAiClick(e) {
   else if (btn.dataset.act === 'retry-ai') { if (!state.searching) runAi(); }
   else if (btn.dataset.act === 'copy-plan' && state.aiReport) {
     const i = Number(btn.dataset.index);
-    copyText(planText(state.aiReport.recommendations[i], i), `기획안 ${i + 1}을 복사했습니다.`);
+    copyText(planText(state.aiReport.recommendations[i], i), `기획안 ${i + 1}번을 복사했습니다.`);
   } else if (btn.dataset.act === 'copy-plan-tags' && state.aiReport) {
     const rec = state.aiReport.recommendations[Number(btn.dataset.index)];
     copyText(rec.tags.join(', '), `추천 태그 ${rec.tags.length}개를 복사했습니다.`);
@@ -1443,9 +1583,9 @@ function onTrendClick(e) {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   if (btn.dataset.act === 'focus') {
-    state.feedView = setSegment(el.feedFormat, 'view', 'all');
-    el.outlierFilter.value = '0';
-    setKeywordFilter('');
+    // 목록 필터에 가려져 있으면 이동할 수 없으므로 모두 해제하고 이동
+    const v = state.videos.find(x => x.id === btn.dataset.id);
+    if (v && !passesFilters(v)) resetListFilters();
     setTab('feed');
     focusVideo(btn.dataset.id);
   } else if (btn.dataset.act === 'copy-top-tags' && state.trends) {
@@ -1515,10 +1655,8 @@ function onScatterClick(e) {
     toast('현재 필터에 숨겨진 영상입니다.', 'info', {
       label: '필터 모두 해제',
       onClick: () => {
-        el.outlierFilter.value = '0';
-        state.feedView = setSegment(el.feedFormat, 'view', 'all');
+        resetListFilters();
         setTab('feed');
-        setKeywordFilter('');
         focusVideo(hit.video.id);
       }
     });
@@ -1540,7 +1678,7 @@ function focusVideo(id) {
 
 function drawScatter() {
   const canvas = el.scatterCanvas;
-  if (el.insights.hidden || state.videos.length === 0) return;
+  if (state.searching || el.insights.hidden || state.videos.length === 0) return;
   const rect = canvas.getBoundingClientRect();
   if (rect.width < 10 || rect.height < 10) return;
 
@@ -1676,7 +1814,16 @@ function setEngineToggle(engine) {
   });
 }
 
+// 설정 창이 열려 있는 동안 뒤 화면은 포커스·클릭을 받지 않게 한다(Tab 이 뒤로 나가 Enter 로 검색되는 것 방지)
+const BACKGROUND_SELECTORS = ['.toolbar', '.presets-bar', '.dashboard'];
+function setBackgroundInert(on) {
+  BACKGROUND_SELECTORS.forEach(sel => document.querySelectorAll(sel).forEach(n => { n.inert = on; }));
+}
+
 function openSettings() {
+  if (!el.modal.hidden) return;
+  closeAdvanced();
+  state.settingsReturnFocus = document.activeElement;
   const c = state.config;
   el.apiKey.value = c.youtubeApiKey || '';
   el.apiKey.type = 'password';
@@ -1701,11 +1848,21 @@ function openSettings() {
   refreshCacheStats();
   refreshUsage();
   el.modal.hidden = false;
+  setBackgroundInert(true);
   (c.youtubeApiKey ? el.saveBtn : el.apiKey).focus();
 }
 
 function closeSettings() {
+  if (el.modal.hidden) return;
+  // 저장 중에는 닫지 않는다(결과·오류를 볼 수 있도록)
+  if (state.saving) { toast('설정을 저장하는 중입니다. 잠시만 기다려 주세요.'); return; }
   el.modal.hidden = true;
+  setBackgroundInert(false);
+  // 저장하지 않은 후보 키를 확인했을 수 있으므로 저장된 키 기준 사용량으로 되돌린다
+  refreshUsage();
+  const back = state.settingsReturnFocus;
+  state.settingsReturnFocus = null;
+  if (back && document.contains(back) && typeof back.focus === 'function') back.focus();
 }
 
 async function detectCli(btn) {
@@ -1741,6 +1898,7 @@ function fillSettingFields(c) {
   el.setSearchLimit.value = c.searchLimit ?? 100;
   el.setUnitLimit.value = c.unitLimit ?? 10000;
   setSelect(el.setCacheTtl, String(c.cacheTtlHours ?? 24));
+  setSelect(el.setResultCache, String(c.resultCacheMinutes ?? 60));
 }
 
 function setKeyStatus(text, tone = '') {
@@ -1759,12 +1917,18 @@ async function checkKey() {
   el.btnCheckKey.disabled = false;
   if (res.ok) {
     state.keyCheck = { key, at: res.data.checkedAt };
-    setKeyStatus('정상 동작하는 키입니다(조회 1 유닛 사용). 저장을 눌러 적용하세요.', 'ok');
+    const u = res.data.usage;
+    const changed = key !== (state.config.youtubeApiKey || '');
+    setKeyStatus(changed
+      ? `정상 동작하는 키입니다. 이 키의 오늘 사용량은 검색 ${u.search}회 · 조회 ${u.units} 유닛입니다. 저장을 누르면 이 키 기준으로 한도를 셉니다.`
+      : '정상 동작하는 키입니다(조회 1 유닛 사용).', 'ok');
+    // 확인한 키의 사용량을 바로 보여 준다(사용량은 키별로 따로 센다). 저장 전 후보 키면 설정 창 안내에만 표시
+    refreshUsage(u, { hintOnly: changed });
   } else {
     state.keyCheck = null;
     setKeyStatus(res.error.message, 'err');
+    refreshUsage();
   }
-  refreshUsage();
 }
 
 async function refreshCacheStats() {
@@ -1773,7 +1937,7 @@ async function refreshCacheStats() {
   const st = res.data;
   const kb = st.bytes >= 1048576 ? `${(st.bytes / 1048576).toFixed(1)}MB` : `${Math.max(0, Math.round(st.bytes / 1024))}KB`;
   const oldest = st.oldest ? ` · 가장 오래된 항목 ${new Date(st.oldest).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : '';
-  el.cacheStats.textContent = `지금 저장된 채널 ${st.channels.toLocaleString('ko-KR')}개 · ${kb}${oldest}`;
+  el.cacheStats.textContent = `지금 저장된 채널 ${st.channels.toLocaleString('ko-KR')}개 · ${kb}${oldest} · 최근 검색 결과 ${(st.results || 0).toLocaleString('ko-KR')}개`;
 }
 
 // 두 번 눌러야 비운다(실수 방지). 지우는 것은 다시 받을 수 있는 캐시뿐이다.
@@ -1791,7 +1955,9 @@ async function clearCache() {
   const res = await window.api.clearCache();
   if (!res.ok) return toast(res.error.message, 'error');
   refreshCacheStats();
-  toast('캐시를 비웠습니다. 다음 검색부터 채널 평소 조회수를 새로 받습니다.', 'success');
+  state.cachedAt = 0;
+  renderCacheChip();
+  toast('캐시를 비웠습니다. 다음 검색부터 채널 평소 조회수와 검색 결과를 새로 받습니다.', 'success');
 }
 
 async function resetSettingDefaults() {
@@ -1803,6 +1969,18 @@ async function resetSettingDefaults() {
 }
 
 async function saveSettings() {
+  // Enter 를 빠르게 두 번 눌러도 키 확인·저장을 한 번만 한다
+  if (state.saving || el.saveBtn.disabled) return;
+  state.saving = true;
+  try {
+    await doSaveSettings();
+  } finally {
+    state.saving = false;
+    el.saveBtn.disabled = false;
+  }
+}
+
+async function doSaveSettings() {
   const key = el.apiKey.value.trim();
   const fail = (msg, focus) => {
     el.saveFeedback.className = 'form-feedback err';
@@ -1846,7 +2024,8 @@ async function saveSettings() {
     rememberLast: el.defRemember.checked,
     searchLimit,
     unitLimit,
-    cacheTtlHours: Number(el.setCacheTtl.value)
+    cacheTtlHours: Number(el.setCacheTtl.value),
+    resultCacheMinutes: Number(el.setResultCache.value)
   };
   if (!keyChanged && key && state.keyCheck && state.keyCheck.key === key) keyCheckedAt = state.keyCheck.at;
   if (keyCheckedAt) payload.keyCheckedAt = keyCheckedAt;
@@ -1855,7 +2034,7 @@ async function saveSettings() {
   if (!res.ok) return fail(res.error.message);
   state.config = { ...state.config, ...res.data };
   refreshConfigUI();
-  refreshUsage();
+  state.saving = false;
   closeSettings();
   toast(`설정을 저장했습니다.${warn}`, warn ? 'info' : 'success');
   // 키를 처음 넣었거나 바꿨으면 국가·카테고리 목록을 실제 목록으로 다시 받는다
