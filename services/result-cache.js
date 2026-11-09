@@ -1,6 +1,6 @@
 // ==========================================================================
 // BOKS YOUTUBE FINDER - Search Result Cache
-// 같은 조건(키워드·국가·언어·주제·기간·형식·검색 기준·인기 차트 여부)으로 다시 검색하면
+// 같은 조건(키워드·국가·언어·주제·기간·형식·검색 기준·인기 차트 여부·종교 영상 포함)으로 다시 검색하면
 // 설정한 시간 안에는 저장된 결과를 그대로 돌려준다. 할당량이 들지 않는다.
 // 앱을 다시 켜도 쓸 수 있도록 app-data/cache/results.json 에 최근 몇 개만 보관한다.
 // ==========================================================================
@@ -76,7 +76,8 @@ function resultKey(p) {
     p.source || 'search', p.query || '', p.region || '', p.language || '', p.langOnly !== false,
     p.videoCategoryId || '0', p.source === 'chart' ? '' : (p.publishedPeriod || ''),
     p.source === 'chart' || p.publishedPeriod !== 'custom' ? '' : `${p.customFrom || ''}~${p.customTo || ''}`,
-    p.format || 'all', p.source === 'chart' ? '' : (p.order || '')
+    p.format || 'all', p.source === 'chart' ? '' : (p.order || ''),
+    p.includeReligion === true
   ]);
 }
 

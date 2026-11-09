@@ -129,11 +129,13 @@ async function mapLimit(items, limit, fn) {
  * @param customRange      publishedPeriod === 'custom' 일 때 { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' } (한국 시간 날짜)
  * @param maxSearchCalls   이번 검색에서 쓸 수 있는 search.list 호출 수(남은 일일 한도). 1차 검색조차 못 하면 오류
  */
-async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', langOnly = true, videoCategoryId = '0', publishedPeriod = 'all', customRange = null, format = 'all', order = 'viewCount', channelCache = null, maxSearchCalls = Infinity }) {
+async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode = 'KR', relevanceLanguage = 'ko', langOnly = true, videoCategoryId = '0', publishedPeriod = 'all', customRange = null, format = 'all', order = 'viewCount', channelCache = null, maxSearchCalls = Infinity, includeReligion = false }) {
   if (!apiKey) {
     throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
   query = String(query || '').trim();
+  // 종교 영상 제외(기본). 검색어 자체가 종교 단어면 찾으려는 것이므로 빼지 않는다
+  const dropReligion = !includeReligion && !isReligiousQuery(query);
 
   const params = { part: 'snippet', type: 'video', maxResults: String(Math.min(50, Math.max(1, maxResults))) };
   if (query) params.q = query;
@@ -158,7 +160,7 @@ async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode =
     : [{ order: 'relevance' }, { order: 'relevance', next: true }];
   const buckets = SEARCH_PLAN[fmt].map(videoDuration => ({ videoDuration, steps: stepsFor(), tokens: {}, kept: 0 }));
 
-  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
+  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0, religion: 0 };
   const excludedItems = [];
   const kept = [];
   const videoMap = {};
@@ -239,7 +241,7 @@ async function searchYouTube({ apiKey, query = '', maxResults = 50, regionCode =
       v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
       // 'short' 버킷에는 3~4분 롱폼도 섞여 온다 → 선택한 형식과 다르면 제외
       if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
-      const reason = relevanceIssue(v, query, relevanceLanguage, langOnly);
+      const reason = relevanceIssue(v, query, relevanceLanguage, langOnly) || (dropReligion && isReligious(v) ? 'religion' : null);
       if (reason) {
         excluded[reason]++;
         excludedItems.push({ id, reason, title: v.title, channelTitle: v.channelTitle, viewCount: v.viewCount });
@@ -265,7 +267,7 @@ const CHART_PAGES = 2; // 최대 100개
  * 국가·주제별 인기 차트를 받아 검색과 같은 방식(형식·언어 거르기, 채널 평소 대비 배수)으로 분석한다.
  * 차트는 '지금 인기' 목록이라 기간 조건이 없다.
  */
-async function fetchPopularChart({ apiKey, regionCode = 'KR', videoCategoryId = '0', format = 'all', relevanceLanguage = 'ko', langOnly = true, channelCache = null, maxPages = CHART_PAGES }) {
+async function fetchPopularChart({ apiKey, regionCode = 'KR', videoCategoryId = '0', format = 'all', relevanceLanguage = 'ko', langOnly = true, channelCache = null, maxPages = CHART_PAGES, includeReligion = false }) {
   if (!apiKey) {
     throw new YouTubeApiError('YouTube Data API 키가 없습니다. [설정]에서 API 키를 먼저 등록해 주세요.', 'NO_API_KEY');
   }
@@ -274,7 +276,7 @@ async function fetchPopularChart({ apiKey, regionCode = 'KR', videoCategoryId = 
   if (regionCode && regionCode !== 'ALL') params.regionCode = regionCode;
   if (videoCategoryId && videoCategoryId !== '0') params.videoCategoryId = videoCategoryId;
 
-  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0 };
+  const excluded = { live: 0, format: 0, spam: 0, language: 0, offtopic: 0, religion: 0 };
   const excludedItems = [];
   const kept = [];
   const videoMap = {};
@@ -297,7 +299,7 @@ async function fetchPopularChart({ apiKey, regionCode = 'KR', videoCategoryId = 
       if (v.liveBroadcastContent === 'live' || v.liveBroadcastContent === 'upcoming') { excluded.live++; continue; }
       v.isShorts = v.durationSec > 0 && v.durationSec <= SHORTS_MAX_SEC;
       if ((fmt === 'shorts' && !v.isShorts) || (fmt === 'long' && v.isShorts)) { excluded.format++; continue; }
-      const reason = relevanceIssue(v, '', relevanceLanguage, langOnly);
+      const reason = relevanceIssue(v, '', relevanceLanguage, langOnly) || (!includeReligion && isReligious(v) ? 'religion' : null);
       if (reason) {
         excluded[reason]++;
         excludedItems.push({ id: item.id, reason, title: v.title, channelTitle: v.channelTitle, viewCount: v.viewCount });
@@ -524,6 +526,37 @@ function relevanceIssue(v, query, relevanceLanguage = 'ko', langOnly = true) {
     if (titleHasQuery && found >= Math.ceil(words.length / 2)) return null;
   }
   return 'offtopic';
+}
+
+// --- 종교 영상 판별(설정에서 '종교 영상 포함'을 켜지 않으면 분석에서 뺀다) ---
+// API 에 종교 구분이 없어 글자로 판별한다(100% 정확하지 않음). 플레이리스트·모음 영상도 같은 기준.
+//   확실한 단어: 하나만 있어도 종교 영상 / 약한 단어: 일반 영상에도 쓰이므로 서로 다른 단어가 두 개 이상일 때만
+const RELIGION_STRONG_KO = ['ccm', '찬양', '찬송', '복음성가', '워십', '예배', '설교', '성경', '교회', '성가대', '큐티', '불경', '염불', '법문', '독경', '천수경', '반야심경', '금강경', '법회', '설법'];
+const RELIGION_STRONG_EN = /\b(ccm|worship|hymns?|gospel|sermons?|bible|church|christian|praise\s*(?:&|and)\s*worship)\b/i;
+const RELIGION_WEAK_KO = ['하나님', '하느님', '주님', '예수', '그리스도', '할렐루야', '아멘', '은혜', '기도', '말씀', '성령', '십자가', '부처님', '불교', '스님', '목사', '찬미'];
+const RELIGION_WEAK_EN = /\b(jesus|christ|god|lord|amen|hallelujah|holy\s*spirit|pray(?:er|ing)?|buddha|buddhist)\b/gi;
+
+function religionHits(text) {
+  const raw = String(text || '').normalize('NFC');
+  const c = compact(raw);
+  const strong = RELIGION_STRONG_KO.some(w => c.includes(w)) || RELIGION_STRONG_EN.test(raw);
+  const weak = new Set(RELIGION_WEAK_KO.filter(w => c.includes(w)));
+  for (const m of raw.matchAll(RELIGION_WEAK_EN)) weak.add(m[1].toLowerCase().replace(/\s+/g, ''));
+  return { strong, weak: weak.size };
+}
+
+/** 검색어 자체가 종교 단어면(예: "찬양 모음") 사용자가 찾으려는 것이므로 빼지 않는다 */
+function isReligiousQuery(query) {
+  const h = religionHits(query);
+  return h.strong || h.weak > 0;
+}
+
+function isReligious(v) {
+  const head = [v.title, v.channelTitle, (v.tags || []).join(' ')].join(' ');
+  const h = religionHits(head);
+  if (h.strong) return true;
+  const all = religionHits(`${head} ${String(v.description || '').slice(0, 300)}`);
+  return all.strong && h.weak > 0 || all.weak >= 2;
 }
 
 function round1(x) {
@@ -982,5 +1015,5 @@ module.exports = {
   validateApiKey,
   CATEGORY_NAMES,
   // 테스트용
-  _internal: { relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit, mapVideoItem, buildVideos, apiGet }
+  _internal: { isReligious, isReligiousQuery, relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit, mapVideoItem, buildVideos, apiGet }
 };

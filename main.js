@@ -215,7 +215,8 @@ ipcMain.handle('youtube:search', wrap(async ({ source, query, videoCategoryId, p
     customFrom: String(customFrom || ''),
     customTo: String(customTo || ''),
     format: safeFormat(format),
-    order: safeOrder(order)
+    order: safeOrder(order),
+    includeReligion: config.includeReligion === true
   };
 
   // 같은 조건을 최근에 검색했으면 그 결과를 다시 쓴다(할당량 0)
@@ -243,6 +244,7 @@ ipcMain.handle('youtube:search', wrap(async ({ source, query, videoCategoryId, p
       langOnly: params.langOnly,
       videoCategoryId: params.videoCategoryId,
       format: params.format,
+      includeReligion: params.includeReligion,
       channelCache
     };
     const result = chart

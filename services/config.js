@@ -29,6 +29,8 @@ const TYPED = {
   defaultPeriod: ['7d', oneOf(['24h', '3d', '7d', '30d', '90d', '1y', 'all'])],
   defaultOrder: ['viewCount', oneOf(['viewCount', 'relevance'])],
   rememberLast: [true, v => (typeof v === 'boolean' ? v : undefined)],
+  // 종교 영상(CCM·찬양·설교 등) 포함 여부. 기본은 빼고 분석(글자로 판별, 100% 정확하지 않음)
+  includeReligion: [false, v => (typeof v === 'boolean' ? v : undefined)],
   // API 사용 한도(할당량을 증설받았으면 늘린다)
   searchLimit: [100, intIn(1, 100000)],
   unitLimit: [10000, intIn(100, 10000000)],

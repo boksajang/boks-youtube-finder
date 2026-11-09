@@ -174,7 +174,7 @@ const el = {
   viewsFilter: $('views-filter'), subsFilter: $('subs-filter'),
   keyCheckStatus: $('key-check-status'), btnCheckKey: $('btn-check-key'),
   defRegion: $('def-region'), defLang: $('def-lang'), defFormat: $('def-format'), defPeriod: $('def-period'), defOrder: $('def-order'),
-  defLangOnly: $('def-lang-only'), defRemember: $('def-remember'),
+  defLangOnly: $('def-lang-only'), defRemember: $('def-remember'), defIncludeReligion: $('def-include-religion'),
   setSearchLimit: $('set-search-limit'), setUnitLimit: $('set-unit-limit'), setCacheTtl: $('set-cache-ttl'), setResultCache: $('set-result-cache'),
   btnRefresh: $('btn-refresh'), cacheAge: $('cache-age'),
   btnClearCache: $('btn-clear-cache'), cacheStats: $('cache-stats'), btnResetDefaults: $('btn-reset-defaults')
@@ -456,7 +456,7 @@ function setSearching(on) {
   el.searchBtn.disabled = on;
   el.searchBtn.classList.toggle('is-loading', on);
   el.searchBtn.querySelector('.btn-label').textContent = on ? '분석 중' : '분석하기';
-  el.btnAiRun.disabled = on || state.aiRunning || state.videos.length === 0;
+  updateAiButton();
 }
 
 // 키워드 없이 검색할 때의 이름: "대한민국 인기 영상", "대한민국 게임 인기 쇼츠"
@@ -503,7 +503,7 @@ async function handleSearch(forcedQuery, opts = {}) {
   state.lastRequest = { query, opts: { source: opts.source, preset: opts.preset, label: opts.label } };
   state.activePreset = query ? '' : (opts.preset || '');
   setSearching(true);
-  stopAi('새 검색이 끝나면 기획안을 다시 만듭니다.');
+  stopAi('검색이 끝나면 [기획안 생성]으로 기획안을 만들 수 있습니다.');
   // 검색하는 동안에는 이전 결과의 필터 줄·형식 버튼을 숨긴다(필터를 바꿔 이전 목록이 다시 그려지지 않도록)
   el.filterBar.hidden = true;
   el.btnRefresh.hidden = true;
@@ -557,6 +557,7 @@ async function handleSearch(forcedQuery, opts = {}) {
   state.searchInfo = res.data.searchInfo || null;
   state.keywordFilter = '';
   state.aiReport = null;
+  updateAiButton();
   state.feedView = setSegment(el.feedFormat, 'view', 'all');
   state.openTags.clear();
 
@@ -578,7 +579,8 @@ async function handleSearch(forcedQuery, opts = {}) {
   } else if (b && b.quotaHit) {
     toast('API 사용 한도 때문에 일부 채널의 평소 조회수를 확인하지 못했습니다. 해당 영상은 구독자 대비 배수로 추정해 표시합니다.', 'info');
   }
-  runAi();
+  // AI 기획안은 [기획안 생성]을 눌렀을 때만 만든다(CLI 토큰 절약)
+  renderAiReady();
 }
 
 // 저장된 결과를 보여 주고 있으면 목록 위에 "n분 전 결과 · 새로 검색"을 띄운다
@@ -613,7 +615,7 @@ function resetResults() {
   el.btnRefresh.hidden = true;
   renderPresets();
   renderTrends();
-  el.btnAiRun.disabled = true;
+  updateAiButton();
 }
 
 // ---------------------------------------------------------------------------
@@ -923,8 +925,9 @@ function excludedNote() {
   if (x.offtopic) parts.push(`키워드 무관 ${x.offtopic}개`);
   if (x.live) parts.push(`라이브·예정 ${x.live}개`);
   if (x.format) parts.push(`다른 형식 ${x.format}개`);
-  const total = (x.spam || 0) + (x.language || 0) + (x.offtopic || 0) + (x.live || 0) + (x.format || 0);
-  return { total, parts };
+  if (x.religion) parts.push(`종교 ${x.religion}개`);
+  const total = (x.spam || 0) + (x.language || 0) + (x.offtopic || 0) + (x.live || 0) + (x.format || 0) + (x.religion || 0);
+  return { total, parts, religion: x.religion || 0 };
 }
 
 // 목록 상단 기준 안내: 분석 대상(= 목록 전체 = 지표·트렌드·AI 기준)과 분석에서 뺀 영상 수
@@ -938,7 +941,8 @@ function scopeNote(shown) {
   ];
   if (ex.total) {
     lines.push(`제외 ${ex.total}개(${ex.parts.join(' · ')})는 목록·지표·트렌드·AI 어디에도 넣지 않습니다.`,
-      '해시태그만 나열한 스팸, 선택한 언어 글자가 거의 없는 해외 영상, 제목·태그·설명·채널명 어디에도 키워드가 없는 영상을 걸러냅니다.');
+      '해시태그만 나열한 스팸, 선택한 언어 글자가 거의 없는 해외 영상, 제목·태그·설명·채널명 어디에도 키워드가 없는 영상을 걸러냅니다.',
+      ...(ex.religion ? ['종교 영상(CCM·찬양·설교 등)은 [설정] → 검색 기본값에서 포함할 수 있습니다. 글자로 판별해 100% 정확하지 않습니다.'] : []));
   }
   const si = state.searchInfo;
   if (si && si.source === 'chart') {
@@ -1217,7 +1221,33 @@ async function onFeedClick(e) {
 function setAiRunning(on) {
   state.aiRunning = on;
   el.btnAiStop.hidden = !on;
-  el.btnAiRun.disabled = on || state.searching || state.videos.length === 0;
+  updateAiButton();
+}
+
+// 헤더 버튼: 기획안이 없으면 [기획안 생성](강조), 있으면 [다시 생성]
+function updateAiButton() {
+  const ready = !state.searching && state.videos.length > 0;
+  el.btnAiRun.disabled = state.aiRunning || !ready;
+  el.btnAiRun.hidden = state.aiRunning;
+  const fresh = !state.aiReport;
+  el.btnAiRun.querySelector('span').textContent = fresh ? '기획안 생성' : '다시 생성';
+  el.btnAiRun.querySelector('use').setAttribute('href', fresh ? '#i-spark' : '#i-refresh');
+  el.btnAiRun.classList.toggle('btn-primary', fresh && ready);
+  el.btnAiRun.classList.toggle('btn-ghost', !(fresh && ready));
+}
+
+// 검색은 끝났고 기획안은 아직 만들지 않은 상태
+function renderAiReady() {
+  setAiRunning(false);
+  const n = state.videos.length;
+  const outliers = state.analytics?.outlierCount || 0;
+  el.aiBody.innerHTML = `
+    <div class="state">
+      <div class="state-icon">${icon('spark')}</div>
+      <h3>AI 기획안</h3>
+      <p>분석 대상 ${n}개(떡상 ${outliers}개)로 ${esc(engineLabel())} CLI가 제목 후보·썸네일 구성·첫 10초 대본을 제안합니다. 30~90초 걸리고 CLI 사용량이 들어, 필요할 때만 만듭니다.</p>
+      <div class="actions"><button type="button" class="btn btn-primary btn-sm" data-act="run-ai">${icon('spark')}기획안 생성</button></div>
+    </div>`;
 }
 
 function renderAiIdle(message) {
@@ -1226,7 +1256,7 @@ function renderAiIdle(message) {
     <div class="state">
       <div class="state-icon">${icon('spark')}</div>
       <h3>AI 기획안</h3>
-      <p>${esc(message || `검색하면 PC에 설치된 ${engineLabel()} CLI가 떡상 영상을 분석해 제목 후보, 썸네일 구성, 첫 10초 대본을 제안합니다.`)}</p>
+      <p>${esc(message || `검색한 뒤 [기획안 생성]을 누르면 PC에 설치된 ${engineLabel()} CLI가 떡상 영상을 분석해 제목 후보, 썸네일 구성, 첫 10초 대본을 제안합니다.`)}</p>
     </div>`;
 }
 
@@ -1257,9 +1287,10 @@ async function runAi() {
 
   if (res.ok) {
     state.aiReport = res.data;
+    updateAiButton();
     renderAiReport(res.data);
   } else if (res.error.code === 'CANCELLED') {
-    renderAiIdle('AI 분석을 중지했습니다. [다시 생성]으로 다시 시작할 수 있습니다.');
+    renderAiIdle('AI 분석을 중지했습니다. [기획안 생성]으로 다시 시작할 수 있습니다.');
   } else {
     renderAiError(res.error);
   }
@@ -1270,7 +1301,7 @@ function stopAi(message) {
   if (!state.aiRunning) return;
   state.aiSeq++;
   window.api.cancelStrategy();
-  renderAiIdle(message || 'AI 분석을 중지했습니다. [다시 생성]으로 다시 시작할 수 있습니다.');
+  renderAiIdle(message || 'AI 분석을 중지했습니다. [기획안 생성]으로 다시 시작할 수 있습니다.');
 }
 
 function renderAiError(err) {
@@ -1368,7 +1399,7 @@ function onAiClick(e) {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   if (btn.dataset.act === 'open-settings') openSettings();
-  else if (btn.dataset.act === 'retry-ai') { if (!state.searching) runAi(); }
+  else if (btn.dataset.act === 'retry-ai' || btn.dataset.act === 'run-ai') { if (!state.searching && !state.aiRunning) runAi(); }
   else if (btn.dataset.act === 'copy-plan' && state.aiReport) {
     const i = Number(btn.dataset.index);
     copyText(planText(state.aiReport.recommendations[i], i), `기획안 ${i + 1}번을 복사했습니다.`);
@@ -1895,6 +1926,7 @@ function fillSettingFields(c) {
   setSelect(el.defOrder, c.defaultOrder || 'viewCount');
   el.defLangOnly.checked = c.langOnly !== false;
   el.defRemember.checked = c.rememberLast !== false;
+  el.defIncludeReligion.checked = c.includeReligion === true;
   el.setSearchLimit.value = c.searchLimit ?? 100;
   el.setUnitLimit.value = c.unitLimit ?? 10000;
   setSelect(el.setCacheTtl, String(c.cacheTtlHours ?? 24));
@@ -2022,6 +2054,7 @@ async function doSaveSettings() {
     defaultPeriod: el.defPeriod.value,
     defaultOrder: el.defOrder.value,
     rememberLast: el.defRemember.checked,
+    includeReligion: el.defIncludeReligion.checked,
     searchLimit,
     unitLimit,
     cacheTtlHours: Number(el.setCacheTtl.value),
