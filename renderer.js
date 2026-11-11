@@ -36,7 +36,12 @@ const state = {
   source: 'search',    // 마지막 결과의 출처: search(검색) | chart(YouTube 인기 차트)
   lastRequest: null,   // 마지막 검색 요청({ query, opts }) — [다시 시도]·[새로 검색]에 쓴다
   cachedAt: 0,         // 지금 결과가 저장된 결과면 그 시각(ms)
-  saving: false        // 설정 저장 중(모달 닫기 막음)
+  saving: false,       // 설정 저장 중(모달 닫기 막음)
+  searchInfo: null,    // 마지막 결과의 검색 정보(검색 횟수·출처)
+  pendingRerun: null,  // 검색 중에 조건이 바뀌면 { label, chartOk } — 끝난 뒤 다시 검색
+  keyCheck: null,      // 설정 창에서 [키 확인]으로 확인한 키와 시각
+  settingsReturnFocus: null, // 설정 창을 닫으면 포커스를 돌려줄 요소
+  clearCacheTimer: 0   // [캐시 비우기] 두 번 누르기 대기 타이머
 };
 
 const LANGS = [

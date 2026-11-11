@@ -98,7 +98,7 @@
 ### 필수 요구사항
 - [Node.js](https://nodejs.org/) (v18.0 이상 권장)
 - YouTube Data API v3 키 ([무료 발급 가이드](https://console.cloud.google.com/apis/library/youtube.googleapis.com))
-- Claude CLI (`npm install -g @anthropic-ai/claude-code`) 또는 Codex CLI (선택)
+- Claude CLI (`npm install -g @anthropic-ai/claude-code`) 또는 Codex CLI (선택). Codex 데스크톱 앱만 설치해도 [자동 찾기]가 앱에 들어 있는 CLI(`%LOCALAPPDATA%\OpenAI\Codex\bin\<버전>\codex.exe`)를 찾습니다.
 
 ### 실행 방법
 
@@ -138,6 +138,7 @@ npm start
   - `app-data/usage.json` — 오늘 YouTube API 사용량(이 PC 기준)
 - 이전 버전이 `%APPDATA%\Boks YouTube Finder`에 남긴 설정은 첫 실행 때 한 번 읽어 옮깁니다(원본은 건드리지 않음).
 - AI CLI에는 프롬프트를 **stdin**으로 전달하고, Claude는 `--tools ""`(도구 비활성화)로 실행합니다. 영상 제목 등 외부 데이터가 셸 명령으로 해석되지 않습니다.
+- Claude CLI는 짧은 시스템 프롬프트(`--system-prompt`)와 스킬·명령 끄기(`--disable-slash-commands`)로 실행해, 기획안에 필요 없는 기본 지침을 싣지 않습니다(1회당 고정 입력 약 5,700 → 3,150 토큰). Codex CLI는 짧은 지침 파일(`model_instructions_file`)을 쓰고 셸 도구·웹 검색·AGENTS.md를 꺼서 같은 효과를 냅니다(약 16,900 → 9,500 토큰). 두 CLI 모두 모델 등 사용자 설정은 그대로 씁니다.
 - `app-data/`, `.dev/`는 `.gitignore` 대상입니다.
 
 ## 📁 프로젝트 구조

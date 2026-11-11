@@ -234,4 +234,4 @@ function buildFindings(r) {
   return out;
 }
 
-module.exports = { computeTrends, _internal: { median, kstParts, buildFindings, isOutlier } };
+module.exports = { computeTrends };

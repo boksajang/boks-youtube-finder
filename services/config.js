@@ -188,4 +188,4 @@ function typedDefaults() {
   return Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d]));
 }
 
-module.exports = { loadConfig, saveConfig, canEncrypt, keyNeedsReentry: () => decryptFailed, typedDefaults, DEFAULTS };
+module.exports = { loadConfig, saveConfig, canEncrypt, keyNeedsReentry: () => decryptFailed, typedDefaults };

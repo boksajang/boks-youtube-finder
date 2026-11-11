@@ -81,4 +81,4 @@ function resultKey(p) {
   ]);
 }
 
-module.exports = { createResultCache, resultKey, MAX_KEEP_MS };
+module.exports = { createResultCache, resultKey };

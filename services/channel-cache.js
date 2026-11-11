@@ -98,4 +98,4 @@ function createChannelCache(file, { ttlMs: initialTtl = TTL_MS, now = () => Date
   };
 }
 
-module.exports = { createChannelCache, TTL_MS };
+module.exports = { createChannelCache };

@@ -1009,11 +1009,9 @@ module.exports = {
   fetchPopularChart,
   setUsageRecorder,
   computeMarketAnalytics,
-  extractTitleKeywords,
   fetchRegions,
   fetchCategories,
   validateApiKey,
-  CATEGORY_NAMES,
   // 테스트용
-  _internal: { isReligious, isReligiousQuery, relevanceIssue, calculatePublishedRange, kstDateStart, parseIsoDuration, formatRelativeTime, formatMultiplier, formatNumber, tokenize, explainApiError, computeChannelBaseline, fetchChannelUploads, mapLimit, mapVideoItem, buildVideos, apiGet }
+  _internal: { extractTitleKeywords, isReligious, relevanceIssue, calculatePublishedRange, explainApiError, computeChannelBaseline, buildVideos, apiGet }
 };

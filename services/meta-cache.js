@@ -109,4 +109,4 @@ function createMetaCache(file, { now = () => Date.now() } = {}) {
   };
 }
 
-module.exports = { createMetaCache, FALLBACK_REGIONS, FALLBACK_CATEGORIES };
+module.exports = { createMetaCache };

@@ -124,4 +124,4 @@ function createUsageCounter(file, { now = () => new Date(), limits = () => ({ se
   };
 }
 
-module.exports = { createUsageCounter, quotaDay, nextResetMs, keyId, SEARCH_LIMIT, UNIT_LIMIT };
+module.exports = { createUsageCounter };

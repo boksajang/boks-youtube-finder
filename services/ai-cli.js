@@ -30,13 +30,26 @@ function execFileText(file, args, timeout = 5000) {
   });
 }
 
+// Codex 데스크톱 앱은 CLI 를 PATH 에 넣지 않고 %LOCALAPPDATA%\OpenAI\Codex\bin\<버전 해시>\codex.exe 에 둔다(가장 최근 것 우선)
+function codexDesktopCli(localAppData) {
+  const root = path.join(localAppData, 'OpenAI', 'Codex', 'bin');
+  try {
+    return fs.readdirSync(root)
+      .map(d => path.join(root, d, 'codex.exe'))
+      .filter(p => fs.existsSync(p))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  } catch {
+    return [];
+  }
+}
+
 function candidatePaths(engine) {
   const home = os.homedir();
   if (isWin) {
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
     const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
     return engine === 'codex'
-      ? [path.join(appData, 'npm', 'codex.cmd'), path.join(localAppData, 'Programs', 'codex', 'codex.exe')]
+      ? [path.join(appData, 'npm', 'codex.cmd'), path.join(localAppData, 'Programs', 'codex', 'codex.exe'), ...codexDesktopCli(localAppData)]
       : [path.join(home, '.local', 'bin', 'claude.exe'), path.join(appData, 'npm', 'claude.cmd'), path.join(home, '.claude', 'local', 'claude.exe')];
   }
   const bin = engine;
@@ -337,10 +350,30 @@ function checkCustomCliPath(engine, exe) {
   return '';
 }
 
-function buildInvocation(engine, exe) {
+// Claude CLI 기본 시스템 프롬프트(코딩 에이전트 지침·환경 정보)와 스킬·명령 목록은 기획안에 필요 없어 매 호출 입력 토큰만 늘린다.
+// 짧은 역할 문장으로 바꾸고 스킬·명령을 끈다(실측: 고정 입력 약 5,700 → 3,150 토큰). 모델 등 사용자 설정은 그대로 쓴다.
+// .cmd 실행 시 셸 인자로 들어가므로 따옴표·% & | ^ ! 같은 문자를 쓰지 않는다.
+const CLAUDE_SYSTEM_PROMPT = '당신은 한국 유튜브 콘텐츠 전략가입니다. 사용자 메시지의 지시와 출력 형식만 정확히 따르세요.';
+// Codex 도 기본 지침(코딩 에이전트)·셸 도구·웹 검색·AGENTS.md 를 매번 싣는다. 기획안에는 필요 없으므로
+// 짧은 지침 파일로 바꾸고 셸 도구·웹 검색·AGENTS.md 를 끈다(실측: 고정 입력 약 15,700 → 9,000 토큰).
+// 모델·플러그인 등 사용자 설정(config.toml)은 그대로 쓴다. 이 버전이 모르는 설정은 Codex 가 경고만 하고 무시한다.
+// 값은 TOML 작은따옴표 문자열로 쓴다(.cmd 실행 시 셸 인자의 큰따옴표와 겹치지 않도록).
+const CODEX_INSTRUCTIONS_FILE = 'codex-instructions.md';
+
+function codexOverrides(instructionsFile) {
+  const o = ["web_search='disabled'", 'project_doc_max_bytes=0', 'features.shell_tool=false'];
+  if (instructionsFile && !UNSAFE_PATH_CHARS.test(instructionsFile) && !instructionsFile.includes("'")) {
+    o.push(`model_instructions_file='${instructionsFile}'`);
+  }
+  return o.flatMap(v => ['-c', v]);
+}
+
+/** @param opts.instructionsFile Codex 기본 지침 대신 쓸 파일(절대 경로) */
+function buildInvocation(engine, exe, { instructionsFile = '' } = {}) {
   const args = engine === 'codex'
-    ? ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '-']
-    : ['-p', '--output-format', 'json', '--tools', '', '--no-session-persistence', '--strict-mcp-config'];
+    ? ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', ...codexOverrides(instructionsFile), '-']
+    : ['-p', '--output-format', 'json', '--tools', '', '--no-session-persistence', '--strict-mcp-config',
+      '--system-prompt', CLAUDE_SYSTEM_PROMPT, '--disable-slash-commands'];
 
   // .cmd/.bat 는 셸이 필요하다. 인자는 모두 고정 상수이고 사용자 데이터는 stdin 으로만 전달한다.
   if (isWin && /\.(cmd|bat)$/i.test(exe)) {
@@ -392,7 +425,12 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
   assertActive();
   fs.mkdirSync(workDir, { recursive: true });
   const prompt = buildPrompt(keyword, videos, format, computeTrends(videos, format));
-  const inv = buildInvocation(engine, exe);
+  let instructionsFile = '';
+  if (engine === 'codex') {
+    instructionsFile = path.join(workDir, CODEX_INSTRUCTIONS_FILE);
+    try { fs.writeFileSync(instructionsFile, CLAUDE_SYSTEM_PROMPT, 'utf8'); } catch { instructionsFile = ''; }
+  }
+  const inv = buildInvocation(engine, exe, { instructionsFile });
 
   return new Promise((resolve, reject) => {
     // POSIX 에서는 프로세스 그룹을 만들어 트리 전체를 종료할 수 있게 한다
@@ -477,5 +515,5 @@ module.exports = {
   generateStrategy,
   cancel,
   // 테스트용
-  _internal: { buildPrompt, pickPromptVideos, buildInvocation, extractJsonObject, normalizeReport, decodeConsole, checkCustomCliPath }
+  _internal: { buildPrompt, normalizeReport, checkCustomCliPath, buildInvocation }
 };
