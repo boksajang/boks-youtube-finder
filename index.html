@@ -347,6 +347,11 @@
               <button type="button" class="seg-btn" data-engine="claude" role="radio">Claude CLI</button>
               <button type="button" class="seg-btn" data-engine="codex" role="radio">Codex CLI</button>
             </div>
+            <div class="input-row">
+              <p class="form-hint grow" id="ai-models-status"></p>
+              <button type="button" id="btn-refresh-models" class="btn btn-ghost btn-sm">목록 새로 받기</button>
+            </div>
+            <p class="form-hint">모델·추론 수준 목록은 설정 창을 열 때마다 설치된 CLI에서 새로 받습니다(토큰 사용 없음). [CLI 기본값]은 각 CLI에 설정된 모델을 그대로 쓰고, Claude의 'Opus (최신)' 같은 항목은 항상 그 계열의 최신 모델을 씁니다. 낮은 모델·낮은 추론 수준일수록 빠르고 사용량이 적습니다.</p>
           </section>
 
           <section class="form-section">
@@ -356,6 +361,11 @@
               <button type="button" class="btn btn-ghost btn-sm btn-detect" data-engine="claude">자동 찾기</button>
             </div>
             <p class="form-hint" id="detect-claude-status"></p>
+            <div class="form-grid model-grid">
+              <label class="pop-field"><span class="form-label">모델</span><select id="set-claude-model" class="select model-select" data-engine="claude"></select></label>
+              <label class="pop-field"><span class="form-label">추론 수준</span><select id="set-claude-effort" class="select"></select></label>
+            </div>
+            <input type="text" id="set-claude-model-custom" class="input" placeholder="모델 이름을 직접 입력하세요 (영문·숫자·.-_:[] 만)" spellcheck="false" maxlength="80" hidden>
           </section>
 
           <section class="form-section">
@@ -365,6 +375,11 @@
               <button type="button" class="btn btn-ghost btn-sm btn-detect" data-engine="codex">자동 찾기</button>
             </div>
             <p class="form-hint" id="detect-codex-status"></p>
+            <div class="form-grid model-grid">
+              <label class="pop-field"><span class="form-label">모델</span><select id="set-codex-model" class="select model-select" data-engine="codex"></select></label>
+              <label class="pop-field"><span class="form-label">추론 수준</span><select id="set-codex-effort" class="select"></select></label>
+            </div>
+            <input type="text" id="set-codex-model-custom" class="input" placeholder="모델 이름을 직접 입력하세요 (영문·숫자·.-_:[] 만)" spellcheck="false" maxlength="80" hidden>
           </section>
         </div>
         <div class="modal-foot">

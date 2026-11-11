@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { computeTrends } = require('./trends');
+const { safeModel, safeEffort } = require('./ai-models');
 
 const isWin = process.platform === 'win32';
 const TIMEOUT_MS = 240000; // 형식별 상세 기획안은 응답이 길다
@@ -368,12 +369,19 @@ function codexOverrides(instructionsFile) {
   return o.flatMap(v => ['-c', v]);
 }
 
-/** @param opts.instructionsFile Codex 기본 지침 대신 쓸 파일(절대 경로) */
-function buildInvocation(engine, exe, { instructionsFile = '' } = {}) {
+/**
+ * @param opts.instructionsFile Codex 기본 지침 대신 쓸 파일(절대 경로)
+ * @param opts.model / opts.effort 설정에서 고른 모델·추론 수준(비우면 CLI 설정 그대로). 셸 특수문자가 없는 값만 넘긴다
+ */
+function buildInvocation(engine, exe, { instructionsFile = '', model = '', effort = '' } = {}) {
+  const m = safeModel(model);
+  const e = safeEffort(effort);
   const args = engine === 'codex'
-    ? ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', ...codexOverrides(instructionsFile), '-']
+    ? ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', ...codexOverrides(instructionsFile),
+      ...(m ? ['-m', m] : []), ...(e ? ['-c', `model_reasoning_effort='${e}'`] : []), '-']
     : ['-p', '--output-format', 'json', '--tools', '', '--no-session-persistence', '--strict-mcp-config',
-      '--system-prompt', CLAUDE_SYSTEM_PROMPT, '--disable-slash-commands'];
+      '--system-prompt', CLAUDE_SYSTEM_PROMPT, '--disable-slash-commands',
+      ...(m ? ['--model', m] : []), ...(e ? ['--effort', e] : [])];
 
   // .cmd/.bat 는 셸이 필요하다. 인자는 모두 고정 상수이고 사용자 데이터는 stdin 으로만 전달한다.
   if (isWin && /\.(cmd|bat)$/i.test(exe)) {
@@ -391,7 +399,30 @@ function childEnv() {
   return env;
 }
 
-async function generateStrategy({ engine = 'claude', customPath = '', keyword, videos, workDir, format = 'all' }) {
+/**
+ * 설정의 CLI 경로(비우면 자동 찾기)를 확인해 실행 파일 경로를 돌려준다. 없으면 CLI_NOT_FOUND
+ */
+async function resolveCliPath(engine, customPath = '') {
+  const engineName = engine === 'codex' ? 'Codex' : 'Claude';
+  let exe = (customPath || '').trim().replace(/^"(.*)"$/, '$1');
+  // 예전에 'claude' 처럼 명령 이름만 저장해 둔 경우는 자동 찾기로 대신한다
+  if (exe && !path.isAbsolute(exe) && !/[\\/]/.test(exe)) exe = '';
+  if (exe) {
+    const bad = checkCustomCliPath(engine === 'codex' ? 'codex' : 'claude', exe);
+    if (bad) throw new AiCliError(bad, 'CLI_NOT_FOUND');
+    return exe;
+  }
+  const det = await detectCachedCliPath(engine);
+  if (!det.found) {
+    throw new AiCliError(`${engineName} CLI를 찾지 못했습니다. 설치 후 [설정]에서 [자동 찾기]를 눌러 주세요.`, 'CLI_NOT_FOUND');
+  }
+  return det.path;
+}
+
+/**
+ * @param model  설정에서 고른 모델(비우면 CLI 기본값) · effort 추론 수준(비우면 CLI·모델 기본값)
+ */
+async function generateStrategy({ engine = 'claude', customPath = '', model = '', effort = '', keyword, videos, workDir, format = 'all' }) {
   if (!videos || videos.length === 0) {
     throw new AiCliError('분석할 영상 데이터가 없습니다.', 'NO_DATA');
   }
@@ -407,21 +438,7 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
     if (token !== jobToken) throw new AiCliError('AI 분석을 중단했습니다.', 'CANCELLED');
   };
 
-  let exe = (customPath || '').trim().replace(/^"(.*)"$/, '$1');
-  // 예전에 'claude' 처럼 명령 이름만 저장해 둔 경우는 자동 찾기로 대신한다
-  if (exe && !path.isAbsolute(exe) && !/[\\/]/.test(exe)) exe = '';
-  if (exe) {
-    const bad = checkCustomCliPath(engine === 'codex' ? 'codex' : 'claude', exe);
-    if (bad) throw new AiCliError(bad, 'CLI_NOT_FOUND');
-  } else {
-    const det = await detectCachedCliPath(engine);
-    assertActive();
-    if (!det.found) {
-      throw new AiCliError(`${engineName} CLI를 찾지 못했습니다. 설치 후 [설정]에서 [자동 찾기]를 눌러 주세요.`, 'CLI_NOT_FOUND');
-    }
-    exe = det.path;
-  }
-
+  const exe = await resolveCliPath(engine, customPath);
   assertActive();
   fs.mkdirSync(workDir, { recursive: true });
   const prompt = buildPrompt(keyword, videos, format, computeTrends(videos, format));
@@ -430,7 +447,7 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
     instructionsFile = path.join(workDir, CODEX_INSTRUCTIONS_FILE);
     try { fs.writeFileSync(instructionsFile, CLAUDE_SYSTEM_PROMPT, 'utf8'); } catch { instructionsFile = ''; }
   }
-  const inv = buildInvocation(engine, exe, { instructionsFile });
+  const inv = buildInvocation(engine, exe, { instructionsFile, model, effort });
 
   return new Promise((resolve, reject) => {
     // POSIX 에서는 프로세스 그룹을 만들어 트리 전체를 종료할 수 있게 한다
@@ -512,6 +529,7 @@ async function generateStrategy({ engine = 'claude', customPath = '', keyword, v
 
 module.exports = {
   detectCliPath,
+  resolveCliPath,
   generateStrategy,
   cancel,
   // 테스트용

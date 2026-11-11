@@ -14,6 +14,7 @@ const configService = require('./services/config');
 const youtubeService = require('./services/youtube');
 const { createChannelCache } = require('./services/channel-cache');
 const aiCliService = require('./services/ai-cli');
+const aiModels = require('./services/ai-models');
 const { computeTrends } = require('./services/trends');
 const { createUsageCounter } = require('./services/usage');
 const { createMetaCache } = require('./services/meta-cache');
@@ -195,6 +196,16 @@ ipcMain.handle('cache:clear', wrap(() => {
 }));
 
 ipcMain.handle('cli:detect-path', wrap(({ engine }) => aiCliService.detectCliPath(engine === 'codex' ? 'codex' : 'claude')));
+// 설정 창을 열 때마다 설치된 CLI 에서 모델·추론 수준 목록을 새로 받는다(토큰 사용 없음)
+// 경로는 설정 창에 지금 입력된 값(저장 전이어도)을 쓰고, 주지 않으면 저장된 값을 쓴다
+ipcMain.handle('ai:models', wrap(({ claudePath, codexPath }) => {
+  const config = configService.loadConfig();
+  const pathFor = engine => {
+    const given = engine === 'codex' ? codexPath : claudePath;
+    return typeof given === 'string' ? given.trim() : (engine === 'codex' ? config.codexCliPath : config.claudeCliPath);
+  };
+  return aiModels.listModels(engine => aiCliService.resolveCliPath(engine, pathFor(engine)).catch(() => ''));
+}));
 
 // 키워드는 선택: 비우면 국가·주제·기간·형식 조건의 인기 영상 전체를 분석한다
 //   source 'chart' = YouTube 인기 차트(검색 한도를 쓰지 않음, 키워드·기간 없음)
@@ -281,6 +292,8 @@ ipcMain.handle('ai:generate-strategy', wrap(({ keyword, videos, format }) => {
     videos: Array.isArray(videos) ? videos.slice(0, 150) : [],
     engine: config.aiEngine,
     customPath: config.aiEngine === 'codex' ? config.codexCliPath : config.claudeCliPath,
+    model: config.aiEngine === 'codex' ? config.codexModel : config.claudeModel,
+    effort: config.aiEngine === 'codex' ? config.codexEffort : config.claudeEffort,
     workDir: paths.aiWorkspace
   });
 }));

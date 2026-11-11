@@ -87,6 +87,7 @@
 ### 5. ✨ 형식별 AI 기획안 (우측 패널 상시 노출)
 - **[기획안 생성]을 눌렀을 때만** 만듭니다(검색할 때마다 자동으로 만들지 않아 CLI 사용량을 아낍니다). 만든 뒤에는 [다시 생성]으로 새로 만듭니다.
 - 떡상 영상과 **트렌드 통계(앱이 계산한 실제 수치)**를 함께 AI에 넘깁니다.
+- **모델·추론 수준 선택**: [설정]을 열 때마다 설치된 CLI에서 모델 목록을 새로 받습니다(토큰 사용 없음). Codex는 `codex debug models`로 계정에서 쓸 수 있는 모델과 모델별 추론 수준을, Claude는 항상 그 계열 최신 모델을 가리키는 별칭(Opus·Sonnet·Haiku 등)과 `--effort` 수준을 보여 줍니다. [CLI 기본값]을 고르면 각 CLI 자체 설정을 그대로 쓰고, 목록에 없는 모델은 [직접 입력]할 수 있습니다. 낮은 모델·낮은 추론 수준일수록 빠르고 사용량이 적습니다.
 - **전체**: 쇼츠 2개 + 롱폼 2개 기획안과 쇼츠·롱폼 운영 전략
 - **롱폼만 / 쇼츠만**: 그 형식 기획안 3개를 더 자세히(롱폼: 시간 표시 구성안 5~7단계·첫 30초 오프닝 / 쇼츠: 초 단위 장면 4~6컷·첫 1~2초 훅)
 - 공통: 떡상 패턴 요약, 제목 공식, 썸네일·첫 화면 공통 요소, 틈새 공략 각도, 기획안별 다른 제목 후보·권장 길이·대상 시청자·시청 유지 포인트·추천 태그·근거
@@ -138,7 +139,7 @@ npm start
   - `app-data/usage.json` — 오늘 YouTube API 사용량(이 PC 기준)
 - 이전 버전이 `%APPDATA%\Boks YouTube Finder`에 남긴 설정은 첫 실행 때 한 번 읽어 옮깁니다(원본은 건드리지 않음).
 - AI CLI에는 프롬프트를 **stdin**으로 전달하고, Claude는 `--tools ""`(도구 비활성화)로 실행합니다. 영상 제목 등 외부 데이터가 셸 명령으로 해석되지 않습니다.
-- Claude CLI는 짧은 시스템 프롬프트(`--system-prompt`)와 스킬·명령 끄기(`--disable-slash-commands`)로 실행해, 기획안에 필요 없는 기본 지침을 싣지 않습니다(1회당 고정 입력 약 5,700 → 3,150 토큰). Codex CLI는 짧은 지침 파일(`model_instructions_file`)을 쓰고 셸 도구·웹 검색·AGENTS.md를 꺼서 같은 효과를 냅니다(약 16,900 → 9,500 토큰). 두 CLI 모두 모델 등 사용자 설정은 그대로 씁니다.
+- Claude CLI는 짧은 시스템 프롬프트(`--system-prompt`)와 스킬·명령 끄기(`--disable-slash-commands`)로 실행해, 기획안에 필요 없는 기본 지침을 싣지 않습니다(1회당 고정 입력 약 5,700 → 3,150 토큰). Codex CLI는 짧은 지침 파일(`model_instructions_file`)을 쓰고 셸 도구·웹 검색·AGENTS.md를 꺼서 같은 효과를 냅니다(약 16,900 → 9,500 토큰). 모델·추론 수준은 [설정]에서 고른 값만 덮어쓰고(`--model`/`--effort`, `-m`/`model_reasoning_effort`), 고르지 않으면 각 CLI의 사용자 설정을 그대로 씁니다.
 - `app-data/`, `.dev/`는 `.gitignore` 대상입니다.
 
 ## 📁 프로젝트 구조
@@ -159,6 +160,7 @@ boks-youtube-finder/
 │   ├── result-cache.js      # 같은 조건 검색 결과 재사용(할당량 절약)
 │   ├── trends.js            # 트렌드 지표(형식·채널 규모·길이·요일·시간대·제목 패턴·태그·채널)
 │   ├── usage.js             # YouTube API 일일 사용량 집계
+│   ├── ai-models.js         # Claude/Codex 모델·추론 수준 목록(설치된 CLI에서 조회)
 │   └── ai-cli.js            # Claude/Codex CLI 탐색·실행·타임아웃·취소·응답 파싱
 ├── assets/                  # 앱 아이콘 (icon.svg 원본 → icon.png / icon.ico)
 ├── scripts/generate-icons.js# 아이콘 생성 (npm run icons)

@@ -41,7 +41,9 @@ const state = {
   pendingRerun: null,  // 검색 중에 조건이 바뀌면 { label, chartOk } — 끝난 뒤 다시 검색
   keyCheck: null,      // 설정 창에서 [키 확인]으로 확인한 키와 시각
   settingsReturnFocus: null, // 설정 창을 닫으면 포커스를 돌려줄 요소
-  clearCacheTimer: 0   // [캐시 비우기] 두 번 누르기 대기 타이머
+  clearCacheTimer: 0,  // [캐시 비우기] 두 번 누르기 대기 타이머
+  aiModels: null,      // 설정 창을 열 때 CLI 에서 받은 모델·추론 수준 목록 { claude, codex }
+  modelsReq: 0         // 모델 목록 요청 번호(늦게 도착한 이전 응답 무시)
 };
 
 const LANGS = [
@@ -182,7 +184,12 @@ const el = {
   defLangOnly: $('def-lang-only'), defRemember: $('def-remember'), defIncludeReligion: $('def-include-religion'),
   setSearchLimit: $('set-search-limit'), setUnitLimit: $('set-unit-limit'), setCacheTtl: $('set-cache-ttl'), setResultCache: $('set-result-cache'),
   btnRefresh: $('btn-refresh'), cacheAge: $('cache-age'),
-  btnClearCache: $('btn-clear-cache'), cacheStats: $('cache-stats'), btnResetDefaults: $('btn-reset-defaults')
+  btnClearCache: $('btn-clear-cache'), cacheStats: $('cache-stats'), btnResetDefaults: $('btn-reset-defaults'),
+  aiModelsStatus: $('ai-models-status'), btnRefreshModels: $('btn-refresh-models'),
+  model: {
+    claude: { model: $('set-claude-model'), effort: $('set-claude-effort'), custom: $('set-claude-model-custom') },
+    codex: { model: $('set-codex-model'), effort: $('set-codex-effort'), custom: $('set-codex-model-custom') }
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -304,7 +311,11 @@ async function setupWindowControls() {
 function refreshConfigUI() {
   const hasKey = !!state.config.youtubeApiKey;
   el.settingsAlert.hidden = hasKey;
-  el.aiEnginePill.textContent = `${engineLabel()} CLI`;
+  const eng = state.config.aiEngine === 'codex' ? 'codex' : 'claude';
+  const model = state.config[`${eng}Model`] || '';
+  const effort = state.config[`${eng}Effort`] || '';
+  el.aiEnginePill.textContent = `${engineLabel()} CLI${model ? ` · ${model}` : ''}`;
+  el.aiEnginePill.title = `모델: ${model || 'CLI 기본값'} · 추론 수준: ${effort ? effortLabel(effort) : '기본값'}`;
 }
 
 function setupEvents() {
@@ -434,6 +445,8 @@ function setupEvents() {
     if (btn) setEngineToggle(btn.dataset.engine);
   });
   document.querySelectorAll('.btn-detect').forEach(btn => btn.addEventListener('click', () => detectCli(btn)));
+  AI_ENGINES.forEach(e => el.model[e].model.addEventListener('change', () => onModelSelectChange(e)));
+  el.btnRefreshModels.addEventListener('click', loadAiModels);
   $('btn-open-console').addEventListener('click', () => window.api.openExternal('https://console.cloud.google.com/apis/library/youtube.googleapis.com'));
 
   document.addEventListener('keydown', (e) => {
@@ -1879,6 +1892,9 @@ function openSettings() {
     ? `마지막 확인: ${new Date(c.keyCheckedAt).toLocaleString('ko-KR')} · 정상 동작`
     : (c.youtubeApiKey ? '아직 확인하지 않은 키입니다. [키 확인]으로 동작 여부를 볼 수 있습니다(조회 1 유닛).' : ''), c.keyCheckedAt ? 'ok' : '');
   fillSettingFields(c);
+  // 이전에 받은 목록(있으면)으로 바로 채우고, CLI 에서 최신 목록을 새로 받는다
+  AI_ENGINES.forEach(e => { fillModelSelect(e, c[`${e}Model`] || ''); fillEffortSelect(e, c[`${e}Effort`] || ''); });
+  loadAiModels();
   el.btnClearCache.textContent = '캐시 비우기';
   el.btnClearCache.classList.remove('is-confirm');
   refreshCacheStats();
@@ -1914,6 +1930,7 @@ async function detectCli(btn) {
     input.value = res.data.path;
     status.className = 'form-hint ok';
     status.textContent = '찾았습니다. 저장을 눌러 적용하세요.';
+    loadAiModels();
   } else {
     status.className = 'form-hint err';
     status.textContent = engine === 'codex'
@@ -1936,6 +1953,128 @@ function fillSettingFields(c) {
   el.setUnitLimit.value = c.unitLimit ?? 10000;
   setSelect(el.setCacheTtl, String(c.cacheTtlHours ?? 24));
   setSelect(el.setResultCache, String(c.resultCacheMinutes ?? 60));
+}
+
+// --- AI 모델·추론 수준 ---
+// 목록은 설정 창을 열 때마다 설치된 CLI 에서 새로 받는다. '' = CLI 기본값(각 CLI 의 자체 설정을 따름)
+const AI_ENGINES = ['claude', 'codex'];
+const MODEL_RE = /^[A-Za-z0-9._:[\]-]{1,80}$/;
+const CUSTOM_MODEL = '__custom__';
+const EFFORT_LABEL = { minimal: '최소', low: '낮음 · 빠름', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대 · 느림', ultra: '울트라 · 가장 느림' };
+const effortLabel = e => EFFORT_LABEL[e] || e;
+
+function addOption(select, value, text, title = '') {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  if (title) o.title = title;
+  select.appendChild(o);
+}
+
+function readModel(engine) {
+  const f = el.model[engine];
+  return f.model.value === CUSTOM_MODEL ? f.custom.value.trim() : f.model.value;
+}
+
+function fillModelSelect(engine, saved = '') {
+  const f = el.model[engine];
+  const info = state.aiModels?.[engine];
+  const cur = info?.current?.model || '';
+  f.model.textContent = '';
+  addOption(f.model, '', `CLI 기본값${cur ? ` (현재: ${cur})` : ''}`, '각 CLI에 설정된 모델을 그대로 씁니다');
+  const ids = new Set(['']);
+  for (const m of info?.models || []) {
+    addOption(f.model, m.id, m.label, `${m.id}${m.desc ? ` — ${m.desc}` : ''}`);
+    ids.add(m.id);
+  }
+  // 목록을 받기 전에는 저장된 값을 그대로 보여 준다(받은 뒤 목록에 없으면 '직접 입력'으로 옮긴다)
+  if (!info && saved) { addOption(f.model, saved, saved); ids.add(saved); }
+  addOption(f.model, CUSTOM_MODEL, '직접 입력…');
+  const custom = !!saved && !ids.has(saved);
+  f.model.value = custom ? CUSTOM_MODEL : saved;
+  f.custom.value = custom ? saved : '';
+  f.custom.hidden = !custom;
+}
+
+/** 엔진·모델별로 고를 수 있는 추론 수준과 기본 수준. 목록을 아직 못 받았으면 null */
+function effortsFor(engine) {
+  const info = state.aiModels?.[engine];
+  if (!info) return null;
+  const curEffort = info.current?.effort || '';
+  if (engine === 'claude') return { list: info.efforts || [], def: curEffort };
+  const id = readModel(engine) || info.current?.model || '';
+  const m = (info.models || []).find(x => x.id === id);
+  if (m) return { list: m.efforts, def: curEffort || m.defaultEffort };
+  // 목록에 없는 모델(직접 입력)은 모든 모델의 수준을 합쳐 보여 준다
+  const all = new Map();
+  (info.models || []).forEach(x => x.efforts.forEach(e => all.set(e.id, e)));
+  return { list: [...all.values()], def: curEffort };
+}
+
+function fillEffortSelect(engine, saved = '') {
+  const f = el.model[engine];
+  const e = effortsFor(engine);
+  const list = e?.list || [];
+  f.effort.textContent = '';
+  addOption(f.effort, '', `기본값${e?.def ? ` (${effortLabel(e.def)})` : ''}`, 'CLI 설정 또는 모델 기본 수준을 씁니다');
+  list.forEach(x => addOption(f.effort, x.id, x.label));
+  let value = saved;
+  if (value && !list.some(x => x.id === value)) {
+    if (!e) addOption(f.effort, value, effortLabel(value)); // 목록 받기 전
+    else value = ''; // 이 모델이 지원하지 않는 수준은 기본값으로
+  }
+  f.effort.value = value;
+}
+
+function setModelsStatus(text, tone = '') {
+  el.aiModelsStatus.textContent = text;
+  el.aiModelsStatus.className = `form-hint grow${tone ? ' ' + tone : ''}`;
+}
+
+async function loadAiModels() {
+  const req = ++state.modelsReq;
+  el.btnRefreshModels.disabled = true;
+  setModelsStatus('설치된 CLI에서 모델 목록을 받는 중…');
+  const res = await window.api.getAiModels({ claudePath: el.claudePath.value.trim(), codexPath: el.codexPath.value.trim() });
+  if (req !== state.modelsReq) return;
+  el.btnRefreshModels.disabled = false;
+  if (el.modal.hidden) return;
+  if (!res.ok) { setModelsStatus(`모델 목록을 받지 못했습니다: ${res.error.message}`, 'err'); return; }
+  // 지금 고른 값은 유지하고 목록만 바꾼다
+  const keep = Object.fromEntries(AI_ENGINES.map(e => [e, { model: readModel(e), effort: el.model[e].effort.value }]));
+  state.aiModels = res.data;
+  AI_ENGINES.forEach(e => { fillModelSelect(e, keep[e].model); fillEffortSelect(e, keep[e].effort); });
+  const part = (name, i) => {
+    if (!i.found && !i.models.length) return `${name} CLI 없음`;
+    if (!i.found) return `${name} CLI 없음(저장된 목록 ${i.models.length}개)`;
+    return `${name} 모델 ${i.models.length}개${i.source === 'cache' ? '(CLI 저장 목록)' : ''}`;
+  };
+  const time = new Date().toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' });
+  setModelsStatus(`${part('Claude', res.data.claude)} · ${part('Codex', res.data.codex)} — ${time} 기준 최신 목록`, 'ok');
+}
+
+function onModelSelectChange(engine) {
+  const f = el.model[engine];
+  const custom = f.model.value === CUSTOM_MODEL;
+  f.custom.hidden = !custom;
+  if (custom) f.custom.focus();
+  // Codex 는 모델마다 쓸 수 있는 추론 수준이 다르다
+  if (engine === 'codex') fillEffortSelect(engine, f.effort.value);
+}
+
+/** 저장할 모델·추론 값. 잘못된 직접 입력이면 { error, focus } */
+function readAiModelSettings() {
+  const out = {};
+  for (const e of AI_ENGINES) {
+    const f = el.model[e];
+    const m = readModel(e);
+    if (f.model.value === CUSTOM_MODEL && !MODEL_RE.test(m)) {
+      return { error: `${e === 'codex' ? 'Codex' : 'Claude'} 모델 이름을 확인해 주세요(영문·숫자와 . - _ : [ ] 만, 80자 이내).`, focus: f.custom };
+    }
+    out[`${e}Model`] = m;
+    out[`${e}Effort`] = f.effort.value;
+  }
+  return { values: out };
 }
 
 function setKeyStatus(text, tone = '') {
@@ -2029,6 +2168,8 @@ async function doSaveSettings() {
   const unitLimit = Math.round(Number(el.setUnitLimit.value));
   if (!(searchLimit >= 1 && searchLimit <= 100000)) return fail('하루 검색 한도는 1~100,000 사이로 입력해 주세요.', el.setSearchLimit);
   if (!(unitLimit >= 100 && unitLimit <= 10000000)) return fail('하루 조회 한도는 100~10,000,000 사이로 입력해 주세요.', el.setUnitLimit);
+  const ai = readAiModelSettings();
+  if (ai.error) return fail(ai.error, ai.focus);
 
   el.saveBtn.disabled = true;
   // 키를 바꿨으면 저장 전에 실제로 동작하는지 확인(1 유닛). 키 자체가 잘못된 경우만 막고, 일시적인 실패는 저장한다.
@@ -2052,6 +2193,7 @@ async function doSaveSettings() {
     aiEngine: el.engineToggle.querySelector('.seg-btn.active')?.dataset.engine || 'claude',
     claudeCliPath: el.claudePath.value.trim(),
     codexCliPath: el.codexPath.value.trim(),
+    ...ai.values,
     region: el.defRegion.value || state.config.region || 'KR',
     language: el.defLang.value || state.config.language || 'ko',
     langOnly: el.defLangOnly.checked,

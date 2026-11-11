@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('api', {
   // AI CLI
   generateStrategy: (params) => invoke('ai:generate-strategy', params),
   cancelStrategy: () => invoke('ai:cancel'),
+  getAiModels: (paths) => invoke('ai:models', paths),
 
   // Files & shell
   openExternal: (url) => invoke('shell:open-external', { url }),

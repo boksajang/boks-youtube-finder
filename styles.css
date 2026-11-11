@@ -709,3 +709,11 @@ button.thumb:focus-visible, .vtitle[data-act]:focus-visible, .vchan-link:focus-v
 .input-row { align-items: flex-end; }
 #btn-clear-cache.is-confirm { border-color: var(--bad); color: var(--bad); }
 #btn-reset-defaults { margin-right: auto; }
+
+/* 설정 · AI 모델 목록 상태 줄 */
+.input-row > .form-hint.grow { flex: 1; min-width: 0; align-self: center; }
+/* AI 패널 엔진 표시: 모델 이름이 길면 줄임표 */
+#ai-engine-pill { display: inline-block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; line-height: 20px; vertical-align: middle; }
+/* 세로 배치(form-section) 안의 단독 입력칸은 flex:1 로 높이가 줄지 않게 */
+.form-section > .input { flex: none; }
+.model-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

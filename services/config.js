@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { safeStorage, app } = require('electron');
 const { paths, ensureDir } = require('./paths');
+const { safeModel, safeEffort } = require('./ai-models');
 
 // 문자열 설정(그대로 저장)
 const STRING_DEFAULTS = {
@@ -19,6 +20,8 @@ const STRING_DEFAULTS = {
 
 // 형식이 정해진 설정: [기본값, 검증 함수(잘못된 값이면 undefined)]
 const oneOf = list => v => (list.includes(v) ? v : undefined);
+const modelOrEmpty = v => (v === '' ? '' : safeModel(v) || undefined);
+const effortOrEmpty = v => (v === '' ? '' : safeEffort(v) || undefined);
 const intIn = (lo, hi) => v => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : undefined; };
 const TYPED = {
   // 검색 기본값
@@ -37,7 +40,12 @@ const TYPED = {
   // 채널 평소 조회수 캐시 유지 시간
   cacheTtlHours: [24, oneOf([6, 12, 24, 72, 168])],
   // 같은 조건 검색 결과를 다시 쓰는 시간(분, 0 = 쓰지 않음). 다시 쓰면 할당량이 들지 않는다
-  resultCacheMinutes: [60, oneOf([0, 30, 60, 180, 360])]
+  resultCacheMinutes: [60, oneOf([0, 30, 60, 180, 360])],
+  // AI 기획안 모델·추론 수준('' = CLI 기본 설정 그대로). 목록은 설정 창을 열 때 CLI 에서 새로 받는다
+  claudeModel: ['', modelOrEmpty],
+  claudeEffort: ['', effortOrEmpty],
+  codexModel: ['', modelOrEmpty],
+  codexEffort: ['', effortOrEmpty]
 };
 
 const DEFAULTS = { ...STRING_DEFAULTS, ...Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d])) };
@@ -183,9 +191,12 @@ function saveConfig(partial) {
   }
 }
 
+// '기본값으로 되돌리기'에서 제외하는 AI 설정
+const AI_TYPED = new Set(['claudeModel', 'claudeEffort', 'codexModel', 'codexEffort']);
+
 /** 검색 기본값·한도·캐시 설정만 기본값으로 되돌린다(API 키·AI 설정은 유지) */
 function typedDefaults() {
-  return Object.fromEntries(Object.entries(TYPED).map(([k, [d]]) => [k, d]));
+  return Object.fromEntries(Object.entries(TYPED).filter(([k]) => !AI_TYPED.has(k)).map(([k, [d]]) => [k, d]));
 }
 
 module.exports = { loadConfig, saveConfig, canEncrypt, keyNeedsReentry: () => decryptFailed, typedDefaults };
