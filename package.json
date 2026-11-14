@@ -8,9 +8,44 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "icons": "electron scripts/generate-icons.js"
+    "icons": "electron scripts/generate-icons.js",
+    "dist": "electron-builder --win zip --x64"
   },
   "devDependencies": {
-    "electron": "^33.2.0"
+    "electron": "^33.2.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.boksajang.youtubefinder",
+    "productName": "Boks YouTube Finder",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "services/**/*",
+      "assets/icon.png",
+      "assets/icon.ico",
+      "package.json"
+    ],
+    "electronDist": "node_modules/electron/dist",
+    "npmRebuild": false,
+    "asar": true,
+    "artifactName": "Boks-YouTube-Finder-${version}-win-x64.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    }
   }
 }

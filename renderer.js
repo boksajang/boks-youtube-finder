@@ -1325,7 +1325,7 @@ function stopAi(message) {
 }
 
 function renderAiError(err) {
-  const cliIssue = ['CLI_NOT_FOUND', 'CLI_SPAWN'].includes(err.code);
+  const cliIssue = ['CLI_NOT_FOUND', 'CLI_SPAWN', 'CLI_NODE_MISSING'].includes(err.code);
   el.aiBody.innerHTML = `
     <div class="state">
       <div class="state-icon is-error">${icon('alert')}</div>
@@ -1936,7 +1936,7 @@ async function detectCli(btn) {
   } else {
     status.className = 'form-hint err';
     status.textContent = engine === 'codex'
-      ? 'Codex CLI를 찾지 못했습니다. 설치(npm i -g @openai/codex) 후 다시 시도하거나 경로를 직접 입력하세요.'
+      ? 'Codex CLI를 찾지 못했습니다. Codex 데스크톱 앱 또는 CLI(npm i -g @openai/codex)를 설치한 뒤 다시 시도하거나 경로를 직접 입력하세요.'
       : 'Claude CLI를 찾지 못했습니다. Claude Code를 설치한 뒤 다시 시도하거나 경로를 직접 입력하세요.';
   }
 }
@@ -2046,13 +2046,17 @@ async function loadAiModels() {
   const keep = Object.fromEntries(AI_ENGINES.map(e => [e, { model: readModel(e), effort: el.model[e].effort.value }]));
   state.aiModels = res.data;
   AI_ENGINES.forEach(e => { fillModelSelect(e, keep[e].model); fillEffortSelect(e, keep[e].effort); });
-  const part = (name, i) => {
-    if (!i.found && !i.models.length) return `${name} CLI 없음`;
-    if (!i.found) return `${name} CLI 없음(저장된 목록 ${i.models.length}개)`;
-    return `${name} 모델 ${i.models.length}개${i.source === 'cache' ? '(CLI 저장 목록)' : ''}`;
-  };
+  // CLI 가 없으면 목록은 기본 별칭(Claude)·이전에 받아 둔 목록(Codex)뿐이므로 '설치 안 됨'으로 알린다
+  const part = (name, i) => (i.found
+    ? `${name} 모델 ${i.models.length}개${i.source === 'cache' ? '(CLI 저장 목록)' : ''}`
+    : `${name} CLI 설치 안 됨`);
+  const { claude, codex } = res.data;
   const time = new Date().toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' });
-  setModelsStatus(`${part('Claude', res.data.claude)} · ${part('Codex', res.data.codex)} — ${time} 기준 최신 목록`, 'ok');
+  if (!claude.found && !codex.found) {
+    setModelsStatus('Claude·Codex CLI가 설치되어 있지 않습니다. AI 기획안을 쓰려면 둘 중 하나를 설치한 뒤 [자동 찾기]를 눌러 주세요. 검색·분석은 CLI 없이도 쓸 수 있습니다.', 'err');
+  } else {
+    setModelsStatus(`${part('Claude', claude)} · ${part('Codex', codex)} — ${time} 기준 목록`, 'ok');
+  }
 }
 
 function onModelSelectChange(engine) {

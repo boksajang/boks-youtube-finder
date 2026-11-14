@@ -17,9 +17,16 @@
 ## 시작하기
 
 필요한 것
-- [Node.js](https://nodejs.org/) 18 이상
 - YouTube Data API v3 키 ([Google Cloud Console](https://console.cloud.google.com/apis/library/youtube.googleapis.com)에서 무료 발급)
-- AI 기획안을 쓰려면 Claude CLI(`npm install -g @anthropic-ai/claude-code`) 또는 Codex CLI(npm 설치 또는 Codex 데스크톱 앱). 설정의 [자동 찾기]로 찾습니다.
+- AI 기획안을 쓰려면 Claude CLI(`npm install -g @anthropic-ai/claude-code`) 또는 Codex CLI(npm 설치 또는 Codex 데스크톱 앱). 설정의 [자동 찾기]로 찾습니다. CLI가 없어도 검색·분석은 쓸 수 있습니다.
+
+### Windows 포터블(설치 없음)
+1. [Releases](https://github.com/boksajang/boks-youtube-finder/releases/latest)에서 `Boks-YouTube-Finder-<버전>-win-x64.zip`을 받아 원하는 폴더에 압축을 풉니다.
+2. `Boks YouTube Finder.exe`를 실행합니다. 코드 서명이 없어 처음 실행할 때 SmartScreen 경고가 뜨면 [추가 정보] → [실행]을 누르세요. **Smart App Control이 켜진 PC에서는 실행이 차단될 수 있으니** 아래 소스 실행을 이용하세요.
+3. 설정·캐시는 압축을 푼 폴더 안 `app-data/`에 저장됩니다. 지우려면 폴더를 삭제하면 됩니다. 새 버전으로 바꿀 때 `app-data/` 폴더를 옮기면 설정이 유지됩니다.
+
+### 소스에서 실행
+[Node.js](https://nodejs.org/) 18 이상이 필요합니다.
 
 ```bash
 git clone https://github.com/boksajang/boks-youtube-finder.git

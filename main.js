@@ -138,7 +138,9 @@ function wrap(handler) {
     try {
       return { ok: true, data: await handler(payload || {}, event) };
     } catch (err) {
-      if (err.code !== 'CANCELLED') console.error('[IPC]', err);
+      // 취소·CLI 미설치는 예상된 상황이라 스택을 남기지 않는다(화면에 안내가 나간다)
+      if (err.code === 'CLI_NOT_FOUND') console.warn('[IPC]', err.message);
+      else if (err.code !== 'CANCELLED') console.error('[IPC]', err);
       return {
         ok: false,
         error: { code: err.code || 'UNKNOWN', message: err.message || '알 수 없는 오류가 발생했습니다.', detail: err.detail || '' }

@@ -3,3 +3,5 @@ node_modules/
 app-data/
 # 개발 점검·E2E 산출물 — 커밋 금지
 .dev/
+# 배포용 빌드 결과물(릴리스에 첨부) — 커밋 금지
+dist/
