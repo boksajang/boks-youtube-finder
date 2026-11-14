@@ -25,6 +25,43 @@ class AiCliError extends Error {
 
 // --- CLI 경로 탐색 ---
 
+// macOS·Linux 에서 Finder·Dock 등 GUI 로 실행한 앱은 PATH 가 /usr/bin:/bin 정도뿐이라,
+// npm 으로 설치한 CLI(#!/usr/bin/env node)가 node 를 찾지 못한다. 사용자의 로그인·대화형 셸 PATH 를 한 번 받아 합친다.
+let shellPathReady = null;
+function ensureShellPath() {
+  if (isWin) return Promise.resolve();
+  if (!shellPathReady) {
+    shellPathReady = (async () => {
+      const shell = process.env.SHELL || '/bin/zsh';
+      const out = await execFileText(shell, ['-ilc', 'printf "__P__%s__P__" "$PATH"'], 8000);
+      const m = /__P__(.*?)__P__/s.exec(out);
+      const home = os.homedir();
+      const extra = ['/opt/homebrew/bin', '/usr/local/bin', path.join(home, '.local', 'bin'), path.join(home, '.volta', 'bin'), path.join(home, '.bun', 'bin')];
+      const parts = [...(m ? m[1].split(':') : []), ...(process.env.PATH || '').split(':'), ...extra].filter(p => p && p.startsWith('/'));
+      process.env.PATH = [...new Set(parts)].join(':');
+    })();
+  }
+  return shellPathReady;
+}
+
+/** 실행 파일이 있는 폴더를 PATH 맨 앞에 둔다(같은 폴더의 node 를 찾도록, macOS·Linux) */
+function pathWithExeDir(exe) {
+  if (isWin || !exe || !path.isAbsolute(exe)) return process.env.PATH || '';
+  return [...new Set([path.dirname(exe), ...(process.env.PATH || '').split(':')])].filter(Boolean).join(':');
+}
+
+const expandHome = p => (!isWin && /^~(?=\/|$)/.test(p) ? os.homedir() + p.slice(1) : p);
+
+// nvm 으로 설치한 node 의 전역 bin(최신 버전 우선)
+function nvmBins(bin) {
+  const root = path.join(os.homedir(), '.nvm', 'versions', 'node');
+  try {
+    return fs.readdirSync(root).sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).map(v => path.join(root, v, 'bin', bin));
+  } catch {
+    return [];
+  }
+}
+
 function execFileText(file, args, timeout = 5000) {
   return new Promise(resolve => {
     execFile(file, args, { timeout, windowsHide: true, encoding: 'utf8' }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
@@ -54,13 +91,24 @@ function candidatePaths(engine) {
       : [path.join(home, '.local', 'bin', 'claude.exe'), path.join(appData, 'npm', 'claude.cmd'), path.join(home, '.claude', 'local', 'claude.exe')];
   }
   const bin = engine;
-  return [
+  const list = [
     path.join(home, '.local', 'bin', bin),
     path.join(home, '.claude', 'local', bin),
     `/opt/homebrew/bin/${bin}`,
     `/usr/local/bin/${bin}`,
-    path.join(home, '.npm-global', 'bin', bin)
+    path.join(home, '.npm-global', 'bin', bin),
+    path.join(home, '.volta', 'bin', bin),
+    path.join(home, '.bun', 'bin', bin),
+    path.join(home, 'Library', 'pnpm', bin),
+    ...nvmBins(bin)
   ];
+  // Codex 데스크톱 앱(macOS)에 들어 있는 CLI
+  if (engine === 'codex' && process.platform === 'darwin') {
+    for (const apps of ['/Applications', path.join(home, 'Applications')]) {
+      list.push(path.join(apps, 'Codex.app', 'Contents', 'Resources', 'codex'), path.join(apps, 'Codex.app', 'Contents', 'Resources', 'bin', 'codex'));
+    }
+  }
+  return list;
 }
 
 /** @returns {Promise<{found:boolean, path:string}>} */
@@ -74,10 +122,12 @@ async function detectCliPath(engine) {
       .filter(p => /\.(exe|cmd|bat)$/i.test(p));
     found.sort((a, b) => (/\.exe$/i.test(b) ? 1 : 0) - (/\.exe$/i.test(a) ? 1 : 0));
   } else {
-    // GUI 로 실행된 앱은 PATH 가 짧으므로 로그인 셸에서 확인
-    const shell = process.env.SHELL || '/bin/sh';
-    const out = (await execFileText(shell, ['-lc', `command -v ${name}`])).trim();
-    if (out.startsWith('/')) found = [out.split('\n')[0]];
+    // GUI 로 실행된 앱은 PATH 가 짧으므로 로그인+대화형 셸(.zprofile·.zshrc 모두 읽음)에서 확인.
+    // 셸 시작 스크립트가 다른 글을 출력할 수 있어 마지막 절대 경로 줄만 쓴다
+    await ensureShellPath();
+    const shell = process.env.SHELL || '/bin/zsh';
+    const lines = (await execFileText(shell, ['-ilc', `command -v ${name}`], 8000)).split('\n').map(l => l.trim()).filter(l => l.startsWith('/'));
+    if (lines.length) found = [lines[lines.length - 1]];
   }
 
   for (const p of [...found, ...candidatePaths(name)]) {
@@ -125,7 +175,7 @@ function videoLine(v, i) {
   return [
     `${i + 1}. [${v.isShorts ? '쇼츠' : '롱폼'} ${v.durationFormatted || '?'}] ${sanitize(v.title)}`,
     `   채널: ${sanitize(v.channelTitle)} (구독자 ${v.subscriberCountFormatted}) · 조회수 ${v.viewCountFormatted} · ${v.publishedAtRelative} 업로드${isOutlier(v) ? ' · 떡상' : ''}`,
-    `   ${main} · 구독자 대비 ${v.subsRatioFormatted} · 하루 평균 ${v.viewsPerDayFormatted}회${v.likeRate !== null && v.likeRate !== undefined ? ` · 좋아요율 ${v.likeRate}%` : ''}`,
+    `   ${main}${v.subsRatio != null ? ` · 구독자 대비 ${v.subsRatioFormatted}` : ''} · 하루 평균 ${v.viewsPerDayFormatted}회${v.likeRate !== null && v.likeRate !== undefined ? ` · 좋아요율 ${v.likeRate}%` : ''}`,
     tags ? `   태그: ${tags}` : ''
   ].filter(Boolean).join('\n');
 }
@@ -177,9 +227,9 @@ const PLAN_SCHEMA = {
 function buildPrompt(keyword, videos, format = 'all', trends = null) {
   const pick = pickPromptVideos(videos, format);
   const lines = pick.picked.map(videoLine).join('\n');
-  const rule = '떡상 영상 = 조회수 1만 회 이상이면서 그 채널 평소 조회수의 3배 이상';
+  const rule = '조회수 1만 회 이상이면서 그 채널 평소 조회수의 3배 이상';
   const intro = pick.supplemented
-    ? `아래는 실제 검색 영상입니다(${rule}). 떡상 영상이 적은 형식은 조회수 상위 영상으로 채웠으니 "떡상" 표시 영상에 더 무게를 두세요.`
+    ? `아래는 실제 검색 영상입니다(떡상 = ${rule}). 떡상 영상이 적은 형식은 조회수 상위 영상으로 채웠으니 "떡상" 표시 영상에 더 무게를 두세요.`
     : `아래는 실제 검색 영상 중 떡상 영상(${rule})을 배수 순으로 고른 것입니다.`;
 
   let task;
@@ -196,8 +246,8 @@ function buildPrompt(keyword, videos, format = 'all', trends = null) {
   }
 
   const stats = trendSummary(trends, format);
-  return `당신은 한국 유튜브 시장을 분석하는 콘텐츠 전략가입니다.
-검색 키워드: "${sanitize(keyword)}" · 분석 형식: ${FORMAT_LABEL[format] || '전체'}
+  // 역할은 시스템 프롬프트(Claude)·지침 파일(Codex)에서 주므로 여기서 반복하지 않는다
+  return `검색 키워드: "${sanitize(keyword)}" · 분석 형식: ${FORMAT_LABEL[format] || '전체'}
 
 ${stats ? `[검색 결과 통계 — 앱이 계산한 실제 수치]\n${stats}\n\n` : ''}${intro}
 <videos>
@@ -324,6 +374,11 @@ function killTree(child) {
     try { process.kill(-child.pid, 'SIGTERM'); } catch {
       try { child.kill('SIGTERM'); } catch { /* already gone */ }
     }
+    // 종료 신호를 무시하면 3초 뒤 프로세스 그룹을 강제 종료
+    setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode) return;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
+    }, 3000).unref();
   }
 }
 
@@ -340,7 +395,8 @@ function cancel() {
 const UNSAFE_PATH_CHARS = /["%&|<>^!`\r\n]/;
 function checkCustomCliPath(engine, exe) {
   const name = engine === 'codex' ? 'Codex' : 'Claude';
-  if (!path.isAbsolute(exe)) return `${name} CLI 경로는 전체 경로(예: C:\\Users\\...\\${engine}.cmd)로 입력해 주세요.`;
+  const example = isWin ? `C:\\Users\\...\\${engine}.cmd` : `/opt/homebrew/bin/${engine}`;
+  if (!path.isAbsolute(exe)) return `${name} CLI 경로는 전체 경로(예: ${example})로 입력해 주세요.`;
   if (UNSAFE_PATH_CHARS.test(exe)) return `${name} CLI 경로에 쓸 수 없는 문자(" % & | < > ^ ! 등)가 있습니다.`;
   let st = null;
   try { st = fs.statSync(exe); } catch { /* 없음 */ }
@@ -391,8 +447,10 @@ function buildInvocation(engine, exe, { instructionsFile = '', model = '', effor
   return { command: exe, args, shell: false };
 }
 
-function childEnv() {
+function childEnv(exe) {
   const env = { ...process.env };
+  // Windows 는 환경 변수 이름이 'Path' 라 PATH 를 따로 넣으면 두 개가 생기므로 macOS·Linux 에서만 바꾼다
+  if (!isWin) env.PATH = pathWithExeDir(exe);
   // 상위 Claude Code 세션 안에서 앱을 띄운 경우의 중첩 실행 표식 제거
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
@@ -404,7 +462,8 @@ function childEnv() {
  */
 async function resolveCliPath(engine, customPath = '') {
   const engineName = engine === 'codex' ? 'Codex' : 'Claude';
-  let exe = (customPath || '').trim().replace(/^"(.*)"$/, '$1');
+  await ensureShellPath();
+  let exe = expandHome((customPath || '').trim().replace(/^"(.*)"$/, '$1'));
   // 예전에 'claude' 처럼 명령 이름만 저장해 둔 경우는 자동 찾기로 대신한다
   if (exe && !path.isAbsolute(exe) && !/[\\/]/.test(exe)) exe = '';
   if (exe) {
@@ -451,7 +510,7 @@ async function generateStrategy({ engine = 'claude', customPath = '', model = ''
 
   return new Promise((resolve, reject) => {
     // POSIX 에서는 프로세스 그룹을 만들어 트리 전체를 종료할 수 있게 한다
-    const child = spawn(inv.command, inv.args, { cwd: workDir, env: childEnv(), shell: inv.shell, windowsHide: true, detached: !isWin });
+    const child = spawn(inv.command, inv.args, { cwd: workDir, env: childEnv(exe), shell: inv.shell, windowsHide: true, detached: !isWin });
     const job = { child, cancelled: false };
     currentJob = job;
 
@@ -509,6 +568,11 @@ async function generateStrategy({ engine = 'claude', customPath = '', model = ''
       }
 
       if (code !== 0 && !text) {
+        // npm 으로 설치한 CLI 가 node 를 못 찾은 경우(macOS·Linux GUI 실행)는 CLI 자체가 없는 것과 구분한다
+        const nodeMissing = !isWin && /env: .?node.?: No such file|node: (command )?not found/i.test(stderr);
+        if (nodeMissing) {
+          return reject(new AiCliError(`${engineName} CLI 실행에 필요한 Node.js를 찾지 못했습니다. Node.js 설치 여부와, 터미널에서 which node 로 나온 경로가 셸 설정(.zprofile·.zshrc)의 PATH 에 있는지 확인해 주세요.`, 'CLI_NODE_MISSING', stderr.slice(0, 2000)));
+        }
         const notFound = /not recognized|인식되지 않|No such file|not found/i.test(stderr);
         const loginNeeded = /login|log in|authenticat|로그인/i.test(stderr + stdout);
         const message = notFound ? `${engineName} CLI를 찾지 못했습니다. [설정]에서 경로를 확인해 주세요.`
@@ -533,5 +597,5 @@ module.exports = {
   generateStrategy,
   cancel,
   // 테스트용
-  _internal: { buildPrompt, normalizeReport, checkCustomCliPath, buildInvocation }
+  _internal: { buildPrompt, normalizeReport, checkCustomCliPath, buildInvocation, candidatePaths, expandHome, pathWithExeDir }
 };

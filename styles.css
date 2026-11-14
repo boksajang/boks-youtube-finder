@@ -31,8 +31,8 @@
   --gold: #f5b942;
   --violet: #8ea2ff;
 
-  --font: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
-  --mono: "Cascadia Mono", Consolas, monospace;
+  --font: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -92,6 +92,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .win-btn:hover { background: var(--hover); color: var(--text); }
 .win-close:hover { background: #c42b1c; color: #fff; }
 body.is-mac .titlebar-brand { padding-left: 80px; }
+body.is-mac.is-fullscreen .titlebar-brand { padding-left: 0; }
 body.is-mac .win-controls { display: none; }
 
 /* ---------- Toolbar ---------- */

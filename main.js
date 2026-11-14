@@ -51,7 +51,8 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return;
+    // mac 은 창을 모두 닫아도 앱이 남아 있으므로 다시 실행하면 창을 새로 연다
+    if (!mainWindow) { if (app.isReady()) createWindow(); return; }
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   });
@@ -85,6 +86,10 @@ function createWindow() {
   const sendMaxState = () => mainWindow && mainWindow.webContents.send('win:maximized-changed', mainWindow.isMaximized());
   mainWindow.on('maximize', sendMaxState);
   mainWindow.on('unmaximize', sendMaxState);
+  // mac 전체 화면에서는 신호등 버튼이 사라지므로 타이틀바 왼쪽 여백을 없앤다
+  const sendFull = full => mainWindow && mainWindow.webContents.send('win:fullscreen-changed', full);
+  mainWindow.on('enter-full-screen', () => sendFull(true));
+  mainWindow.on('leave-full-screen', () => sendFull(false));
 
   // 새 창·다른 페이지로의 이동은 모두 차단한다(파일 드래그&드롭 포함). 외부 링크는 shell:open-external 로만 연다.
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -95,9 +100,10 @@ function createWindow() {
   // 개발 모드에서만 DevTools 단축키 허용 (기본 메뉴 제거로 사라진 단축키 보완)
   if (!app.isPackaged) {
     mainWindow.webContents.on('before-input-event', (e, input) => {
-      const devtools = input.key === 'F12' || (input.control && input.shift && input.key.toUpperCase() === 'I');
+      const mod = input.control || input.meta; // mac 은 Cmd
+      const devtools = input.key === 'F12' || (mod && input.shift && input.key.toUpperCase() === 'I');
       if (input.type === 'keyDown' && devtools) mainWindow.webContents.toggleDevTools();
-      if (input.type === 'keyDown' && input.control && input.key.toUpperCase() === 'R') mainWindow.webContents.reload();
+      if (input.type === 'keyDown' && mod && !input.shift && input.key.toUpperCase() === 'R') mainWindow.webContents.reload();
     });
   }
 
@@ -110,7 +116,10 @@ function createWindow() {
 app.whenReady().then(() => {
   if (!gotLock) return;
   channelCache.setTtl(configService.loadConfig().cacheTtlHours * 3600000);
-  Menu.setApplicationMenu(null);
+  // Windows·Linux 는 메뉴 없이(커스텀 타이틀바). mac 은 Cmd+C/V/X/A/Z·Cmd+Q 가 메뉴 역할로 동작하므로 최소 메뉴를 둔다
+  Menu.setApplicationMenu(isMac ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]) : null);
+  // mac 은 창 아이콘을 쓰지 않으므로 개발 모드 Dock 아이콘을 직접 지정한다(설치판은 번들 아이콘)
+  if (isMac && !app.isPackaged && app.dock && fs.existsSync(ICON_PATH)) app.dock.setIcon(ICON_PATH);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

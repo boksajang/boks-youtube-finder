@@ -7,6 +7,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
 
 contextBridge.exposeInMainWorld('api', {
+  platform: process.platform,
   // Config
   getConfig: () => invoke('config:get'),
   saveConfig: (config) => invoke('config:save', config),
@@ -40,6 +41,11 @@ contextBridge.exposeInMainWorld('api', {
       const listener = (_e, maximized) => cb(maximized);
       ipcRenderer.on('win:maximized-changed', listener);
       return () => ipcRenderer.removeListener('win:maximized-changed', listener);
+    },
+    onFullscreenChange: (cb) => {
+      const listener = (_e, full) => cb(full);
+      ipcRenderer.on('win:fullscreen-changed', listener);
+      return () => ipcRenderer.removeListener('win:fullscreen-changed', listener);
     }
   }
 });

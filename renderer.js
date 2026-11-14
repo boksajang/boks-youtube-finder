@@ -4,6 +4,8 @@
 
 const $ = (id) => document.getElementById(id);
 
+if (window.api && window.api.platform === 'darwin') document.body.classList.add('is-mac');
+
 const state = {
   config: null,
   keyword: '',
@@ -294,7 +296,7 @@ async function refreshUsage(snapshot, { hintOnly = false } = {}) {
 
 async function setupWindowControls() {
   const res = await window.api.window.state();
-  if (res.ok && res.data.platform === 'darwin') document.body.classList.add('is-mac');
+  window.api.window.onFullscreenChange(full => document.body.classList.toggle('is-fullscreen', full));
   const setMax = (maximized) => {
     el.winMax.innerHTML = icon(maximized ? 'restore' : 'max');
     el.winMax.title = maximized ? '이전 크기로' : '최대화';

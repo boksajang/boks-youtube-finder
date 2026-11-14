@@ -32,6 +32,8 @@ function runText(exe, args, timeout = 15000) {
   return new Promise(resolve => {
     const done = (err, stdout) => resolve(err && !stdout ? '' : String(stdout || ''));
     const opts = { timeout, windowsHide: true, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 };
+    // macOS·Linux: 실행 파일 폴더를 PATH 앞에 둬 같은 폴더의 node 를 찾게 한다(셸 PATH 보정은 경로 확인 단계에서 이미 끝남)
+    if (!isWin && path.isAbsolute(exe)) opts.env = { ...process.env, PATH: [path.dirname(exe), process.env.PATH || ''].filter(Boolean).join(':') };
     if (isWin && /\.(cmd|bat)$/i.test(exe)) execFile([exe, ...args].map(a => `"${a}"`).join(' '), [], { ...opts, shell: true }, done);
     else execFile(exe, args, opts, done);
   });

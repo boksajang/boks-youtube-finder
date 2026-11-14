@@ -2,7 +2,11 @@
 // BOKS YOUTUBE FINDER - App Data Paths
 // 모든 앱 데이터(설정·Electron 캐시·AI 작업 폴더)는 앱 폴더 하위 app-data/ 에 둔다.
 //   - 개발 모드: <프로젝트>/app-data
-//   - 설치판:    <실행 파일 폴더>/app-data
+//   - 설치판:    Windows = <실행 파일 폴더>/app-data
+//               macOS·Linux = OS 사용자 데이터 폴더/app-data (예외: .app 번들·AppImage·/opt 는 쓸 수 없고,
+//               번들에 쓰면 코드 서명이 깨지며 업데이트 때 데이터가 사라진다)
+//               macOS: ~/Library/Application Support/Boks YouTube Finder/app-data
+//               Linux: ~/.config/Boks YouTube Finder/app-data
 // ==========================================================================
 
 const path = require('path');
@@ -13,8 +17,14 @@ function resolveAppRoot() {
   return app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
 }
 
+function resolveDataDir(appRoot) {
+  if (!app.isPackaged || process.platform === 'win32') return path.join(appRoot, 'app-data');
+  // userData 는 아직 바꾸기 전이라 OS 기본 위치(appData/<앱 이름>)를 가리킨다
+  return path.join(app.getPath('userData'), 'app-data');
+}
+
 const appRoot = resolveAppRoot();
-const dataDir = path.join(appRoot, 'app-data');
+const dataDir = resolveDataDir(appRoot);
 
 const paths = {
   appRoot,
